@@ -2,6 +2,8 @@
 
 A modern player data management system for Roblox games featuring ProfileService integration, replica-based state replication, automatic leaderboards, and batched updates.
 
+📖 **[Full Documentation](https://playerstate.netlify.app)** - Complete API reference, guides, and examples
+
 ## Features
 
 - ✅ **ProfileService Integration** - Secure data persistence with session locking
@@ -21,7 +23,7 @@ A modern player data management system for Roblox games featuring ProfileService
 ### Option 2: Manual Installation
 
 1. Clone or download this repository
-git clone https://github.com/bellaouzo/PlayerState.git
+   git clone https://github.com/bellaouzo/PlayerState.git
 2. Open your Roblox game in Studio
 3. In ReplicatedStorage, make sure the folder is named `PlayerState`
 4. The require path will be: `game.ReplicatedStorage.PlayerState.PlayerStateServer`
@@ -40,12 +42,12 @@ Edit `DefaultData.luau` to define your player data:
 return {
     Coins = 0,
     Level = 1,
-    
+
     Inventory = {
         Weapons = {},
         Items = {}
     },
-    
+
     leaderstats = {
         ["💰 Coins"] = "Coins",
         ["⭐ Level"] = "Level"
@@ -64,7 +66,7 @@ local Config = {
             Name = "PlayerData_v1",
             Scope = "Production"
         },
-        
+
         Leaderboard = {
             Enabled = true,
             TrackedStats = {"Coins", "Level"}
@@ -83,7 +85,7 @@ local PlayerState = require(ReplicatedStorage.PlayerState.PlayerStateServer)
 
 Players.PlayerAdded:Connect(function(player)
     local success = PlayerState.Init(player)
-    
+
     if success then
         print(`[PlayerState] Loaded data for {player.Name}`)
     end
@@ -286,14 +288,10 @@ local replica = PlayerState.GetReplica()
 This library uses the following third-party dependencies (included):
 
 - **ProfileStore** by MAD STUDIO (loleris) - DataStore session management
-- **Replica** by MAD STUDIO (loleris) - State replication system  
+- **Replica** by MAD STUDIO (loleris) - State replication system
 - **Maid, Signal, Remote, RateLimit** by MAD STUDIO - Supporting utilities
 
 See individual file headers for full attribution details.
-
-## Documentation
-
-Full documentation available at: **[playerstate.netlify.app](https://playerstate.netlify.app)**
 
 ## License
 
