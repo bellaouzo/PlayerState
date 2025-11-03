@@ -22,11 +22,8 @@ A modern player data management system for Roblox games featuring ProfileService
 
 ### Option 2: Manual Installation
 
-1. Clone or download this repository
-   git clone https://github.com/bellaouzo/PlayerState.git
-2. Open your Roblox game in Studio
-3. In ReplicatedStorage, make sure the folder is named `PlayerState`
-4. The require path will be: `game.ReplicatedStorage.PlayerState.PlayerStateServer`
+*Clone or download this repository*
+git clone https://github.com/bellaouzo/PlayerState.git
 
 ### Option 3: GitHub Cloning Plugin
 
