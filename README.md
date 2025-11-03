@@ -14,18 +14,19 @@ A modern player data management system for Roblox games featuring ProfileService
 
 ## Installation
 
-### Option 1: Manual Installation
+### Option 1: Download Model (.rbxm)
+
+**Recommended for beginners** - Download the latest `.rbxm` file from [Releases](https://github.com/bellaouzo/PlayerState/releases/) and drag it into your ReplicatedStorage.
+
+### Option 2: Manual Installation
 
 1. Clone or download this repository
-```bash
-git clone https://github.com/YOURUSERNAME/PlayerState.git
-```
-
+git clone https://github.com/bellaouzo/PlayerState.git
 2. Open your Roblox game in Studio
 3. In ReplicatedStorage, make sure the folder is named `PlayerState`
 4. The require path will be: `game.ReplicatedStorage.PlayerState.PlayerStateServer`
 
-### Option 2: GitHub Cloning Plugin
+### Option 3: GitHub Cloning Plugin
 
 Use the [GitHub Cloning Plugin](https://devforum.roblox.com/t/github-cloning-plugin/31267) to clone directly into Roblox Studio.
 
@@ -284,8 +285,8 @@ local replica = PlayerState.GetReplica()
 
 This library uses the following third-party dependencies (included):
 
-- **ProfileStore** by [MAD STUDIO (loleris)](https://madstudioroblox.com/) - DataStore session management
-- **Replica** by [MAD STUDIO (loleris)](https://madstudioroblox.com/) - State replication system  
+- **ProfileStore** by MAD STUDIO (loleris) - DataStore session management
+- **Replica** by MAD STUDIO (loleris) - State replication system  
 - **Maid, Signal, Remote, RateLimit** by MAD STUDIO - Supporting utilities
 
 See individual file headers for full attribution details.
