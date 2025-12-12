@@ -1165,6 +1165,10 @@ function PlayerState.SaveData(player: Player): boolean
 end
 
 function PlayerState.Increment(player: Player, path: ValuePath, amount: number?): boolean
+	if not player then
+		print("[PlayerState] Invalid player for Increment")
+		return false
+	end
 	local currentValue = PlayerState.GetPath(player, path)
 	if typeof(currentValue) ~= "number" then
 		warn(`[PlayerState] Cannot increment non-numeric value at path: {path}`)
