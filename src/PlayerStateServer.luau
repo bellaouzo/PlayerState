@@ -17,7 +17,7 @@ if not IS_SERVER then
 	error("[PlayerStateServer] This module can only be used on the server")
 end
 
--- Libraries  
+-- Libraries
 local DefaultData = require(script.Parent.DefaultData)
 local ProfileService = require(script.Parent.ProfileStore)
 local ReplicaServer = require(script.Parent.Replica.ReplicaServer)
@@ -41,8 +41,8 @@ export type ProfileStoreInstance = any
 export type ReplicaInstance = ReplicaServer.Replica
 
 export type ArrayPath = string
-export type DictPath = string  
-export type ValuePath = string
+export type DictPath = string
+export type ValuePath = string | { any }
 
 export type BatchOperation = {
 	path: ValuePath,
@@ -123,7 +123,7 @@ if CONFIG.Leaderboard and CONFIG.Leaderboard.SyncInterval and CONFIG.Leaderboard
     CONFIG.Leaderboard.SyncInterval = 60
 end
 
--- IntValue limits 
+-- IntValue limits
 local INT32_MAX = 2147483647
 local INT32_MIN = -2147483648
 
@@ -570,12 +570,12 @@ end
 
 function PlayerState.Init(player: Player, existingData: PlayerData?): boolean
 	if not _ValidatePlayer(player) then return false end
-	
+
 	if profiles[player] or replicas[player] then
 		warn(`[PlayerState] {player.Name} already initialized`)
 		return false
 	end
-	
+
 	if existingData then
 		error("[PlayerState] existingData is not supported")
 	end
@@ -585,7 +585,7 @@ function PlayerState.Init(player: Player, existingData: PlayerData?): boolean
 		warn(`[PlayerState] Init already running for {player.Name}`)
 		return false
 	end
-	
+
 	initInFlight[player.UserId] = true
 
 	local profileKey = CONFIG.Profile.Key .. "_" .. player.UserId
@@ -635,36 +635,36 @@ function PlayerState.Init(player: Player, existingData: PlayerData?): boolean
 		local ok, profOrErr = pcall(function()
 			return profileStore:StartSessionAsync(profileKey)
 		end)
-		
+
 		if not ok or not profOrErr then
 			warn(`[PlayerState] StartSession failed for {player.Name}: {profOrErr}`)
 			return nil
 		end
-		
+
 		local prof: ProfileStoreProfile = profOrErr
 		prof:AddUserId(player.UserId)
 		prof:Reconcile()
-		
+
 		_CleanData(prof.Data, CONFIG.Profile.Template)
-		
+
 		return prof
 	end
-	
+
 	local profile = openSession()
 	if not profile then
 		initInFlight[player.UserId] = nil
 		player:Kick("Failed to load data - please rejoin")
-		
+
 		return false
 	end
 
 	profile.OnSessionEnd:Connect(function()
 		ProfileUnloaded:Fire(player, profile.Data)
-		
+
 		task.delay(2, function()
 			if not player:IsDescendantOf(Players) then return end
 			local newProfile = openSession()
-			
+
 			if newProfile then
 				attach(newProfile)
 			elseif player:IsDescendantOf(Players) then
@@ -678,7 +678,7 @@ function PlayerState.Init(player: Player, existingData: PlayerData?): boolean
 	else
 		profile:EndSession()
 		initInFlight[player.UserId] = nil
-		
+
 		return false
 	end
 
@@ -738,6 +738,10 @@ function PlayerState.SetPath(player: Player, path: ValuePath, value: any): boole
 		return false
 	end
 
+	if type(path) == "table" then
+	    path = table.concat(path, ".")
+	end
+
 	if not string.find(path, ".", 1, true) then
 		local success = pcall(replica.Set, replica, {path}, value)
 		if not success then
@@ -762,6 +766,10 @@ function PlayerState.GetPath(player: Player, path: ValuePath): any
 	local replica = _GetPlayerReplica(player)
 	if not replica then
 		return nil
+	end
+
+	if type(path) == "table" then
+	    path = table.concat(path, ".")
 	end
 
 	if not string.find(path, ".", 1, true) then
@@ -1098,11 +1106,11 @@ function PlayerState.WipePlayerData(player: Player): boolean
 	end
 
 	print(`[PlayerState] Successfully wiped data for {player.Name}`)
-	
+
 	if player:IsDescendantOf(Players) then
 		player:Kick("Your data has been reset. Please rejoin to continue.")
 	end
-	
+
 	return true
 end
 
@@ -1376,4 +1384,4 @@ PlayerState.BeforeSave = BeforeSave
 PlayerState.ProfileLoaded = ProfileLoaded
 PlayerState.ProfileUnloaded = ProfileUnloaded
 
-return PlayerState 
+return PlayerState

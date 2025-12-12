@@ -2,7 +2,7 @@
 
 --[[
 	PlayerStateClient - Client-side player data access
-	
+
 	Documentation: https://playerstate.netlify.app/api/client.html
 --]]
 
@@ -23,7 +23,7 @@ local Config = require(script.Parent.PlayerStateConfig)
 -- Types
 export type PlayerData = typeof(DefaultData)
 export type ReplicaInstance = ReplicaClient.Replica
-export type ValuePath = string
+export type ValuePath = string | { any }
 export type ChangeInfo = {
 	action: "Set" | "SetValues" | "TableInsert" | "TableRemove",
 	path: {string},
@@ -228,7 +228,7 @@ function PlayerState.Get(key: string): any
 	return value
 end
 
-function PlayerState.GetPath(path: ValuePath): any	
+function PlayerState.GetPath(path: ValuePath): any
 	if not _WaitForData() then
 		return nil
 	end
@@ -244,6 +244,10 @@ function PlayerState.GetPath(path: ValuePath): any
 
 	local replicaData = (localReplica :: ReplicaInstance).Data
 
+	if type(path) == "table" then
+	    path = table.concat(path, ".")
+	end
+
 	if not string.find(path, ".", 1, true) then
 		return replicaData[path]
 	end
@@ -255,7 +259,7 @@ function PlayerState.GetPath(path: ValuePath): any
 	return result
 end
 
-function PlayerState.GetFromDict(dictPath: ValuePath, key: string | number): any	
+function PlayerState.GetFromDict(dictPath: ValuePath, key: string | number): any
 	if not _WaitForData() then
 		return nil
 	end
@@ -410,8 +414,8 @@ end
 
 function PlayerState.ClearCache(): ()
 	table.clear(pathCache)
-	table.clear(valueCache)  
+	table.clear(valueCache)
 	table.clear(nestedValueCache)
 end
 
-return PlayerState 
+return PlayerState
