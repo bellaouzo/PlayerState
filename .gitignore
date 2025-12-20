@@ -1,0 +1,30 @@
+# Wally
+wally.lock
+Packages/
+*.lock
+
+# Rojo
+*.rbxl
+*.rbxlx
+*.rbxm
+*.rbxmx
+default.project.json
+.build/
+
+# Selene
+selene.toml
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Logs
+*.log
+
+# Test/example files - exclude from Wally package
+src/ServerScriptService/
+src/StarterPlayerScripts/

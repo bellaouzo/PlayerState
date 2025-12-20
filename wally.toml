@@ -1,0 +1,9 @@
+[package]
+name = "bellaouzo/playerstate"
+version = "1.12.2"
+registry = "https://github.com/UpliftGames/wally-index"
+realm = "shared"
+
+[dependencies]
+
+[dev-dependencies]
