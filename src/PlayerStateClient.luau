@@ -30,6 +30,12 @@ export type ChangeInfo = {
 	index: number?,
 }
 
+export type LeaderboardInfo = {
+	rank: number?,
+	score: number?,
+	statName: string,
+}
+
 export type PlayerStateClient = {
 	Get: (key: string) -> any,
 	GetPath: (path: ValuePath) -> any,
@@ -39,6 +45,7 @@ export type PlayerStateClient = {
 	GetAll: () -> PlayerData?,
 	IsReady: () -> boolean,
 	ClearCache: () -> (),
+	GetLeaderboardInfo: (statName: string) -> LeaderboardInfo?,
 }
 
 -- States
@@ -212,7 +219,7 @@ function PlayerState.Get(key: string): any
 		warn(`[PlayerState] Detected path syntax in Get() call. Use GetPath() instead for nested paths like "{key}"`)
 		return false
 	end
-
+	
 	local currentTime = tick()
 	local cached = valueCache[key]
 	if cached and currentTime - cached.timestamp < CACHE_DURATION then
@@ -410,8 +417,37 @@ end
 
 function PlayerState.ClearCache(): ()
 	table.clear(pathCache)
-	table.clear(valueCache)  
+	table.clear(valueCache)
 	table.clear(nestedValueCache)
+end
+
+function PlayerState.GetLeaderboardInfo(statName: string): LeaderboardInfo?
+	if not _WaitForData() then
+		return nil
+	end
+
+	if not _ValidateReplica(localReplica) then
+		return nil
+	end
+
+	local replica = localReplica :: ReplicaInstance
+	local leaderboardRanks = replica.Data._LeaderboardRanks
+
+	if not leaderboardRanks then
+		return nil
+	end
+
+	local statData = leaderboardRanks[statName]
+
+	if not statData then
+		return nil
+	end
+
+	return {
+		rank = statData.rank,
+		score = statData.score,
+		statName = statName,
+	}
 end
 
 return PlayerState 

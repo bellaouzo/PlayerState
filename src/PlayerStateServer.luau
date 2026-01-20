@@ -375,6 +375,101 @@ local function _UpdateAllLeaderboards(): ()
 	end
 end
 
+local function _GetLeaderboardInternal(statName: string, limit: number): {LeaderboardEntry}
+	local store = leaderboardStores[statName]
+	if not store then
+		return {}
+	end
+
+	local cached = leaderboardCache[statName]
+	local currentTime = os.time()
+
+	if cached and (currentTime - cached.lastUpdate) < 15 then
+		return table.move(cached.data, 1, math.min(limit, #cached.data), 1, {})
+	end
+
+	local success, pages = pcall(function()
+		return store:GetSortedAsync(false, math.max(limit, 100))
+	end)
+
+	if not success then
+		if cached then
+			return table.move(cached.data, 1, math.min(limit, #cached.data), 1, {})
+		end
+		return {}
+	end
+
+	local topPlayers: {LeaderboardEntry} = {}
+	local data = pages:GetCurrentPage()
+
+	for i, entry in data do
+		local userId = tonumber(entry.key)
+		if userId then
+			table.insert(topPlayers, {
+				userId = userId,
+				score = entry.value,
+				rank = i,
+			})
+		end
+	end
+
+	leaderboardCache[statName] = {
+		data = topPlayers,
+		lastUpdate = currentTime,
+	}
+
+	return table.move(topPlayers, 1, math.min(limit, #topPlayers), 1, {})
+end
+
+local function _SyncPlayerLeaderboardRanks(): ()
+	if not CONFIG.Leaderboard.Enabled then return end
+
+	for _, statName in CONFIG.Leaderboard.TrackedStats do
+		local leaderboard = _GetLeaderboardInternal(statName, 100)
+
+		local playerRanks: {[number]: {rank: number, score: number}} = {}
+		for _, entry in leaderboard do
+			playerRanks[entry.userId] = {
+				rank = entry.rank,
+				score = entry.score,
+			}
+		end
+
+		for _, player in Players:GetPlayers() do
+			if not _ValidatePlayer(player) then continue end
+
+			local replica = replicas[player]
+			if not _ValidateReplica(replica) then continue end
+
+			local rankInfo = playerRanks[player.UserId]
+			local currentRanks = replica.Data._LeaderboardRanks or {}
+			local currentStatRank = currentRanks[statName]
+
+			if rankInfo then
+				if not currentStatRank or currentStatRank.rank ~= rankInfo.rank or currentStatRank.score ~= rankInfo.score then
+					local newRanks = table.clone(currentRanks)
+					newRanks[statName] = rankInfo
+
+					pcall(replica.Set, replica, {"_LeaderboardRanks"}, newRanks)
+				end
+			else
+				local value = _GetNestedValue(replica.Data, statName)
+				if typeof(value) == "number" then
+					if not currentStatRank or currentStatRank.score ~= value then
+						local newRanks = table.clone(currentRanks)
+						newRanks[statName] = {
+							rank = nil,
+							score = value,
+						}
+
+						pcall(replica.Set, replica, {"_LeaderboardRanks"}, newRanks)
+					end
+				end
+			end
+		end
+	end
+end
+
 local function _StartPeriodicUpdates(): ()
 	if periodicUpdateThread then
 		task.cancel(periodicUpdateThread)
@@ -384,6 +479,7 @@ local function _StartPeriodicUpdates(): ()
 		while true do
 			task.wait(CONFIG.Leaderboard.SyncInterval)
 			_UpdateAllLeaderboards()
+			_SyncPlayerLeaderboardRanks()
 		end
 	end)
 end
@@ -1169,6 +1265,7 @@ function PlayerState.Increment(player: Player, path: ValuePath, amount: number?)
 		print("[PlayerState] Invalid player for Increment")
 		return false
 	end
+
 	local currentValue = PlayerState.GetPath(player, path)
 	if typeof(currentValue) ~= "number" then
 		warn(`[PlayerState] Cannot increment non-numeric value at path: {path}`)
