@@ -475,6 +475,9 @@ local function _StartPeriodicUpdates(): ()
 		task.cancel(periodicUpdateThread)
 	end
 
+	_UpdateAllLeaderboards()
+	_SyncPlayerLeaderboardRanks()
+
 	periodicUpdateThread = task.spawn(function()
 		while true do
 			task.wait(CONFIG.Leaderboard.SyncInterval)

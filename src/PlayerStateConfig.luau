@@ -19,7 +19,7 @@ local Config = {
 		
 		DataStore = {
 			-- DataStore name (change for different versions/environments)
-			Name = "PlayerData_0.01",
+			Name = "PlayerData_0.011",
 
 			-- Scope: "Production" for live data, "Testing" for mock data
 			Scope = "Production",
@@ -40,12 +40,11 @@ local Config = {
 			Enabled = true,
 
 			-- DataStore name for leaderboards
-			DataStoreName = "PlayerState_Leaderboards",
+			DataStoreName = "PlayerState_Leaderboardss",
 
 			-- Which data fields should have leaderboards (auto-updated when values change)
 			TrackedStats = {
-				"Gems",
-				"Coins",
+				"Coins"
 				-- Add stat names here to create leaderboards
 				-- Examples: "coins", "level", "score", "Inventory.Pills"
 			},
