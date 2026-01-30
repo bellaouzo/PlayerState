@@ -126,6 +126,7 @@ local RemoteCreate = Remote.New("ReplicaCreate")           -- (creation, root_id
 local RemoteBind = Remote.New("ReplicaBind")               -- (replica_id)
 local RemoteDestroy = Remote.New("ReplicaDestroy")         -- (replica_id)
 local RemoteSignalUnreliable = Remote.New("ReplicaSignalUnreliable", true)   -- (replica_id, ...)
+local RemoteBatchedOperations = Remote.New("ReplicaBatchedOperations") -- (replica_id, player, operations)
 
 local Index = 0
 
@@ -236,6 +237,8 @@ export type Replica = {
 	Unsubscribe: (self: any, player: Player) -> (),
 	Identify: (self: any) -> (string),
 	IsActive: (self: any) -> (boolean),
+	BeginBatch: (self: any) -> (),
+	EndBatch: (self: any) -> (),
 	Destroy: (self: any) -> (),
 }
 
@@ -316,6 +319,9 @@ function Replica.New(params: {Token: typeof(ReplicaToken), Tags: {}?, Data: {}?,
 		write_lib_module = params.WriteLib,
 		bind_value = nil,
 		
+		_batchMode = false,
+		_batchQueue = {},
+		
 	}, Replica)
 	
 	Replicas[Index] = self
@@ -350,15 +356,23 @@ function Replica:Set(path: {string}, value: any)
 	-- Replicate change:
 	
 	if WriteFlag == false then
-		local self_id = self.Id
-		if self.replication ~= nil then
-			if self.replication[REPLICATION_ALL] == true then
-				for player in pairs(ReadyPlayers) do
-					RemoteSet:FireClient(player, self_id, path, value)
-				end
-			else
-				for player in pairs(self.replication) do
-					RemoteSet:FireClient(player, self_id, path, value)
+		if self._batchMode == true then
+			table.insert(self._batchQueue, {
+				type = "Set",
+				path = path,
+				value = value
+			})
+		else
+			local self_id = self.Id
+			if self.replication ~= nil then
+				if self.replication[REPLICATION_ALL] == true then
+					for player in pairs(ReadyPlayers) do
+						RemoteSet:FireClient(player, self_id, path, value)
+					end
+				else
+					for player in pairs(self.replication) do
+						RemoteSet:FireClient(player, self_id, path, value)
+					end
 				end
 			end
 		end
@@ -381,15 +395,23 @@ function Replica:SetValues(path: {string}, values: {[string]: any})
 	-- Replicate change:
 	
 	if WriteFlag == false then
-		local self_id = self.Id
-		if self.replication ~= nil then
-			if self.replication[REPLICATION_ALL] == true then
-				for player in pairs(ReadyPlayers) do
-					RemoteSetValues:FireClient(player, self_id, path, values)
-				end
-			else
-				for player in pairs(self.replication) do
-					RemoteSetValues:FireClient(player, self_id, path, values)
+		if self._batchMode == true then
+			table.insert(self._batchQueue, {
+				type = "SetValues",
+				path = path,
+				values = values
+			})
+		else
+			local self_id = self.Id
+			if self.replication ~= nil then
+				if self.replication[REPLICATION_ALL] == true then
+					for player in pairs(ReadyPlayers) do
+						RemoteSetValues:FireClient(player, self_id, path, values)
+					end
+				else
+					for player in pairs(self.replication) do
+						RemoteSetValues:FireClient(player, self_id, path, values)
+					end
 				end
 			end
 		end
@@ -849,6 +871,45 @@ end
 
 function Replica:IsActive(): boolean
 	return self.Maid:IsActive()
+end
+
+function Replica:BeginBatch()
+	if self._batchMode == true then
+		warn(`[{script.Name}]: BeginBatch() called while already in batch mode`)
+		return
+	end
+	
+	self._batchMode = true
+	self._batchQueue = {}
+end
+
+function Replica:EndBatch()
+	if self._batchMode == false then
+		warn(`[{script.Name}]: EndBatch() called without BeginBatch()`)
+		return
+	end
+	
+	self._batchMode = false
+	
+	if #self._batchQueue == 0 then
+		return
+	end
+	
+	local self_id = self.Id
+	local operations = self._batchQueue
+	self._batchQueue = {}
+	
+	if self.replication ~= nil then
+		if self.replication[REPLICATION_ALL] == true then
+			for player in pairs(ReadyPlayers) do
+				RemoteBatchedOperations:FireClient(player, self_id, operations)
+			end
+		else
+			for player in pairs(self.replication) do
+				RemoteBatchedOperations:FireClient(player, self_id, operations)
+			end
+		end
+	end
 end
 
 local function DestroyReplica(replica)

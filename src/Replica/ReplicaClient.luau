@@ -107,6 +107,7 @@ local RemoteCreate = Remote.New("ReplicaCreate")           -- (creation, root_id
 local RemoteBind = Remote.New("ReplicaBind")               -- (replica_id)
 local RemoteDestroy = Remote.New("ReplicaDestroy")         -- (replica_id)
 local RemoteSignalUnreliable = Remote.New("ReplicaSignalUnreliable", true)   -- (replica_id, ...)
+local RemoteBatchedOperations = Remote.New("ReplicaBatchedOperations") -- (replica_id, operations)
 
 local WriteLibCache: {[ModuleScript]: {[string | number]: {Name: string, Id: number, fn: (...any) -> (...any)}}} = {}
 local ReplicationFlag = false
@@ -794,6 +795,40 @@ RemoteWrite.OnClientEvent:Connect(function(id: number, fn_id: number, ...)
 	if success ~= true then
 		error(`[{script.Name}]: Error while updating replica:\n{replica:Identify()}\n` .. msg)
 	end
+end)
+
+RemoteBatchedOperations.OnClientEvent:Connect(function(id: number, operations: {})
+	local replica = GetInternalReplica(id)
+	ReplicationFlag = true
+	
+	for _, operation in ipairs(operations) do
+		local success, msg
+		
+		if operation.type == "Set" then
+			success, msg = pcall(replica.Set, replica, operation.path, operation.value)
+		elseif operation.type == "SetValues" then
+			local basePath = operation.path
+			for key, value in pairs(operation.values) do
+				local fullPath = table.create(#basePath + 1)
+				for i = 1, #basePath do
+					fullPath[i] = basePath[i]
+				end
+				fullPath[#basePath + 1] = key
+				
+				success, msg = pcall(replica.Set, replica, fullPath, value)
+				if success ~= true then
+					break
+				end
+			end
+		end
+		
+		if success ~= true then
+			ReplicationFlag = false
+			error(`[{script.Name}]: Error while updating replica (batched operation):\n{replica:Identify()}\n` .. msg)
+		end
+	end
+	
+	ReplicationFlag = false
 end)
 
 local function RemoteSignalHandle(id: number, ...)
