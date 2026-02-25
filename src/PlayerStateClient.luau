@@ -32,6 +32,11 @@ export type LeaderboardInfo = {
 	score: number?,
 	statName: string,
 }
+export type LeaderboardEntry = {
+	userId: number,
+	score: number,
+	rank: number,
+}
 export type ChangeInfo = {
 	action: "Set" | "SetValues" | "TableInsert" | "TableRemove",
 	path: {string},
@@ -49,6 +54,7 @@ export type PlayerStateClient = {
 	IsReady: () -> boolean,
 	ClearCache: () -> (),
 	GetLeaderboardInfo: (statName: string) -> LeaderboardInfo?,
+	GetLeaderboard: (statName: string, limit: number?) -> {LeaderboardEntry},
 }
 
 local localReplica: ReplicaInstance?
@@ -358,6 +364,18 @@ function PlayerState.GetLeaderboardInfo(statName: string): LeaderboardInfo?
 	end
 
 	return Leaderboard.GetLeaderboardInfo(localReplica, statName)
+end
+
+function PlayerState.GetLeaderboard(statName: string, limit: number?): {LeaderboardEntry}
+	if not WaitForData() then
+		return {}
+	end
+
+	if not Validation.ValidateReplica(localReplica) then
+		return {}
+	end
+
+	return Leaderboard.GetLeaderboard(localReplica, statName, limit)
 end
 
 return PlayerState

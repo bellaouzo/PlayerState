@@ -33,6 +33,37 @@ local function CreateLeaderboardModule(
 	local leaderboardCache: {[string]: {data: {LeaderboardEntry}, lastUpdate: number}} = {}
 	local periodicUpdateThread: thread?
 
+	local function CopyLeaderboardEntries(entries: {LeaderboardEntry}): {LeaderboardEntry}
+		local copiedEntries: {LeaderboardEntry} = {}
+		for i, entry in entries do
+			copiedEntries[i] = {
+				userId = entry.userId,
+				score = entry.score,
+				rank = entry.rank,
+			}
+		end
+		return copiedEntries
+	end
+
+	local function AreLeaderboardEntriesEqual(a: any, b: {LeaderboardEntry}): boolean
+		if typeof(a) ~= "table" or #a ~= #b then
+			return false
+		end
+
+		for i, entry in b do
+			local currentEntry = a[i]
+			if typeof(currentEntry) ~= "table"
+				or currentEntry.userId ~= entry.userId
+				or currentEntry.score ~= entry.score
+				or currentEntry.rank ~= entry.rank
+			then
+				return false
+			end
+		end
+
+		return true
+	end
+
 	local function InitializeLeaderboards()
 		if not config.Leaderboard.Enabled then return end
 
@@ -159,9 +190,10 @@ local function CreateLeaderboardModule(
 		if not config.Leaderboard.Enabled then return end
 
 		local savedLeaderboardRanks: any = nil
+		local savedLeaderboards: any = nil
 
 		local function restoreSavedLeaderboardRanks()
-			if savedLeaderboardRanks == nil then
+			if savedLeaderboardRanks == nil and savedLeaderboards == nil then
 				return
 			end
 
@@ -169,8 +201,12 @@ local function CreateLeaderboardModule(
 			if data._LeaderboardRanks == nil then
 				data._LeaderboardRanks = savedLeaderboardRanks
 			end
+			if data._Leaderboards == nil then
+				data._Leaderboards = savedLeaderboards
+			end
 
 			savedLeaderboardRanks = nil
+			savedLeaderboards = nil
 		end
 
 		local onSave = (profile :: any).OnSave
@@ -178,9 +214,13 @@ local function CreateLeaderboardModule(
 			onSave:Connect(function()
 				local data = profile.Data :: any
 				savedLeaderboardRanks = data._LeaderboardRanks
+				savedLeaderboards = data._Leaderboards
 
 				if savedLeaderboardRanks ~= nil then
 					data._LeaderboardRanks = nil
+				end
+				if savedLeaderboards ~= nil then
+					data._Leaderboards = nil
 				end
 			end)
 		end
@@ -199,6 +239,7 @@ local function CreateLeaderboardModule(
 		local replicas = getReplicas()
 		for _, statName in config.Leaderboard.TrackedStats do
 			local leaderboard = GetLeaderboardInternal(statName, 100)
+			local leaderboardEntries = CopyLeaderboardEntries(leaderboard)
 
 			local playerRanks: {[number]: {rank: number, score: number}} = {}
 			for _, entry in leaderboard do
@@ -220,10 +261,21 @@ local function CreateLeaderboardModule(
 
 				local rankInfo = playerRanks[player.UserId]
 				local currentRanks = (replica.Data :: any)._LeaderboardRanks
+				local currentLeaderboards = (replica.Data :: any)._Leaderboards
 				if typeof(currentRanks) ~= "table" then
 					currentRanks = {}
 				end
+				if typeof(currentLeaderboards) ~= "table" then
+					currentLeaderboards = {}
+				end
 				local currentStatRank = currentRanks[statName]
+				local currentStatLeaderboard = currentLeaderboards[statName]
+
+				if not AreLeaderboardEntriesEqual(currentStatLeaderboard, leaderboardEntries) then
+					local newLeaderboards = table.clone(currentLeaderboards)
+					newLeaderboards[statName] = CopyLeaderboardEntries(leaderboardEntries)
+					pcall(replica.Set, replica, {"_Leaderboards"}, newLeaderboards)
+				end
 
 				if rankInfo then
 					if typeof(currentStatRank) ~= "table"

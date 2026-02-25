@@ -6,7 +6,25 @@ export type LeaderboardInfo = {
 	statName: string,
 }
 
+export type LeaderboardEntry = {
+	userId: number,
+	score: number,
+	rank: number,
+}
+
 local Leaderboard = {}
+
+local function ToLeaderboardInfo(statName: string, statData: any): LeaderboardInfo?
+	if typeof(statData) ~= "table" then
+		return nil
+	end
+
+	return {
+		rank = statData.rank,
+		score = statData.score,
+		statName = statName,
+	}
+end
 
 function Leaderboard.GetLeaderboardInfo(replica: any?, statName: string): LeaderboardInfo?
 	if not replica then
@@ -19,15 +37,39 @@ function Leaderboard.GetLeaderboardInfo(replica: any?, statName: string): Leader
 	end
 
 	local statData = leaderboardRanks[statName]
-	if typeof(statData) ~= "table" then
-		return nil
+	return ToLeaderboardInfo(statName, statData)
+end
+
+function Leaderboard.GetLeaderboard(replica: any?, statName: string, limit: number?): {LeaderboardEntry}
+	if not replica then
+		return {}
 	end
 
-	return {
-		rank = statData.rank,
-		score = statData.score,
-		statName = statName,
-	}
+	local leaderboards = (replica.Data :: any)._Leaderboards
+	if typeof(leaderboards) ~= "table" then
+		return {}
+	end
+
+	local statLeaderboard = leaderboards[statName]
+	if typeof(statLeaderboard) ~= "table" then
+		return {}
+	end
+
+	local entries: {LeaderboardEntry} = {}
+	for _, entry in statLeaderboard do
+		if typeof(entry) == "table" and typeof(entry.userId) == "number" and typeof(entry.score) == "number" and typeof(entry.rank) == "number" then
+			entries[#entries + 1] = {
+				userId = entry.userId,
+				score = entry.score,
+				rank = entry.rank,
+			}
+		end
+	end
+
+	local requestedLimit = if typeof(limit) == "number" and limit > 0 then math.floor(limit) else #entries
+	local clampedLimit = math.min(requestedLimit, #entries)
+
+	return table.move(entries, 1, clampedLimit, 1, {})
 end
 
 return Leaderboard
