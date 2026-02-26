@@ -25,6 +25,16 @@ local Config = {
 			Scope = "Production",
 		},
 
+		-- Allows you to load another user's data profile in Studio for debugging purposes
+		ViewedUser = {
+			-- Studio-only debug profile override:
+			-- 0 = disabled, any other value loads that user's profile key in Studio
+			ViewedUserId = 650756220,
+
+			-- If true, blocks all data mutation APIs while viewing another user's data
+			ReadOnly = true,
+		},
+
 		-- If it will remove fields not in template during data reconciliation
 		CleanExtraFields = false,
 
@@ -48,7 +58,6 @@ local Config = {
 
 			-- Which data fields should have leaderboards (auto-updated when values change)
 			TrackedStats = {
-				"Gems",
 				"Coins",
 				-- Add stat names here to create leaderboards
 				-- Examples: "coins", "level", "score", "Inventory.Pills"
@@ -78,4 +87,4 @@ local Config = {
 	},
 }
 
-return Config
+return Config 

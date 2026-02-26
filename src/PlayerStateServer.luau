@@ -142,6 +142,7 @@ end
 
 local replicas: { [Player]: ReplicaInstance } = {}
 local profiles: { [Player]: ProfileStoreProfile } = {}
+local loadedProfileUserIds: {[Player]: number} = {}
 local initInFlight: {[number]: boolean} = {}
 local profileStore: ProfileStoreInstance
 
@@ -248,6 +249,75 @@ local function _GetPlayerReplica(player: Player): ReplicaInstance?
 	return replica
 end
 
+local function _ResolveViewedUserSettings(): (number, boolean)
+	local viewedConfig = CONFIG.ViewedUser
+	if typeof(viewedConfig) ~= "table" then
+		return 0, true
+	end
+
+	local viewedUserId = viewedConfig.ViewedUserId
+	if typeof(viewedUserId) ~= "number" then
+		if viewedUserId ~= nil then
+			warn("[PlayerState] CONFIG.ViewedUser.ViewedUserId must be a number. Falling back to 0.")
+		end
+
+		viewedUserId = 0
+	end
+
+	viewedUserId = math.floor(viewedUserId)
+	if viewedUserId < 0 then
+		warn("[PlayerState] CONFIG.ViewedUser.ViewedUserId cannot be negative. Falling back to 0.")
+
+		viewedUserId = 0
+	end
+
+	local readOnly = viewedConfig.ReadOnly
+	if typeof(readOnly) ~= "boolean" then
+		if readOnly ~= nil then
+			warn("[PlayerState] CONFIG.ViewedUser.ReadOnly must be a boolean. Falling back to true.")
+		end
+
+		readOnly = true
+	end
+
+	return viewedUserId, readOnly
+end
+
+local function _ResolveEffectiveProfileUserId(player: Player): number
+	local viewedUserId = _ResolveViewedUserSettings()
+
+	if viewedUserId == 0 then
+		return player.UserId
+	end
+
+	if not RunService:IsStudio() then
+		warn("[PlayerState] CONFIG.ViewedUser.ViewedUserId is Studio-only. Falling back to player's own profile.")
+		return player.UserId
+	end
+
+	return viewedUserId
+end
+
+local function _IsViewingAnotherUser(player: Player): boolean
+	local loadedProfileUserId = loadedProfileUserIds[player]
+
+	return loadedProfileUserId ~= nil and loadedProfileUserId ~= player.UserId
+end
+
+local function _CanMutatePlayerData(player: Player): boolean
+	if not _IsViewingAnotherUser(player) then
+		return true
+	end
+
+	local _, readOnly = _ResolveViewedUserSettings()
+	if readOnly then
+		warn(`[PlayerState] Blocked write for {player.Name} while viewing user {loadedProfileUserIds[player]} (ReadOnly mode).`)
+		return false
+	end
+
+	return true
+end
+
 function PlayerState.Init(player: Player, existingData: PlayerData?): boolean
 	if not Validation.ValidatePlayer(player) then return false end
 
@@ -268,10 +338,19 @@ function PlayerState.Init(player: Player, existingData: PlayerData?): boolean
 
 	initInFlight[player.UserId] = true
 
-	local profileKey = CONFIG.Profile.Key .. "_" .. player.UserId
+	local effectiveProfileUserId = _ResolveEffectiveProfileUserId(player)
+	local profileKey = CONFIG.Profile.Key .. "_" .. effectiveProfileUserId
+	local _, viewedReadOnly = _ResolveViewedUserSettings()
+
+	if effectiveProfileUserId ~= player.UserId then
+		local viewedModeLabel = if viewedReadOnly then "read-only" else "writable"
+		
+		print(`[PlayerState] {player.Name} is loading viewed profile {effectiveProfileUserId} ({viewedModeLabel}).`)
+	end
 
 	local function attach(profile: ProfileStoreProfile)
 		profiles[player] = profile
+		loadedProfileUserIds[player] = effectiveProfileUserId
 
 		LeaderboardModule.SetupLeaderboardRankSaveProtection(profile)
 
@@ -392,6 +471,10 @@ end
 
 
 function PlayerState.Set(player: Player, key: string, value: any): boolean
+	if not _CanMutatePlayerData(player) then
+		return false
+	end
+
 	local replica = _GetPlayerReplica(player)
 
 	if not replica then
@@ -453,6 +536,10 @@ function PlayerState.Clone(value: any, deep: boolean?): any
 end
 
 function PlayerState.SetPath(player: Player, path: ValuePath, value: any): boolean
+	if not _CanMutatePlayerData(player) then
+		return false
+	end
+
 	local replica = _GetPlayerReplica(player)
 
 	if not replica then
@@ -515,6 +602,10 @@ function PlayerState.GetPath(player: Player, path: ValuePath): any
 end
 
 function PlayerState.SetValues(player: Player, values: {[string]: any}): boolean
+	if not _CanMutatePlayerData(player) then
+		return false
+	end
+
 	local replica = _GetPlayerReplica(player)
 
 	if not replica then
@@ -548,6 +639,10 @@ function PlayerState.BatchSetValues(player: Player, operations: {BatchOperation}
 		return false
 	end
 
+	if not _CanMutatePlayerData(player) then
+		return false
+	end
+
 	for _, operation in operations do
 		if operation.path == "leaderstats" or string.sub(operation.path, 1, 12) == "leaderstats." then
 			warn(`[PlayerState] Cannot directly modify leaderstats path "{operation.path}" in BatchSetValues. Change the actual data source that the leaderstat references instead.`)
@@ -562,6 +657,10 @@ end
 
 function PlayerState.BatchUpdateValues(player: Player, operations: {BatchUpdateOperation}): boolean
 	if not Validation.ValidatePlayer(player) then
+		return false
+	end
+
+	if not _CanMutatePlayerData(player) then
 		return false
 	end
 
@@ -610,11 +709,19 @@ function PlayerState.FlushBatch(player: Player): boolean
 		return false
 	end
 
+	if not _CanMutatePlayerData(player) then
+		return false
+	end
+
 	BatchModule.FlushBatch(player)
 	return true
 end
 
 function PlayerState.AddToArray(player: Player, arrayPath: ArrayPath, item: any): boolean
+	if not _CanMutatePlayerData(player) then
+		return false
+	end
+
 	local replica = _GetPlayerReplica(player)
 
 	if not replica then
@@ -632,6 +739,10 @@ function PlayerState.AddToArray(player: Player, arrayPath: ArrayPath, item: any)
 end
 
 function PlayerState.RemoveFromArray(player: Player, arrayPath: ArrayPath, index: number): boolean
+	if not _CanMutatePlayerData(player) then
+		return false
+	end
+
 	local replica = _GetPlayerReplica(player)
 
 	if not replica then
@@ -649,6 +760,10 @@ function PlayerState.RemoveFromArray(player: Player, arrayPath: ArrayPath, index
 end
 
 function PlayerState.UpdateArrayItem(player: Player, arrayPath: ArrayPath, index: number, newItem: any): boolean
+	if not _CanMutatePlayerData(player) then
+		return false
+	end
+
 	local replica = _GetPlayerReplica(player)
 
 	if not replica then
@@ -666,6 +781,10 @@ function PlayerState.UpdateArrayItem(player: Player, arrayPath: ArrayPath, index
 end
 
 function PlayerState.SetInDict(player: Player, dictPath: DictPath, key: string | number, value: any): boolean
+	if not _CanMutatePlayerData(player) then
+		return false
+	end
+
 	local replica = _GetPlayerReplica(player)
 
 	if not replica then
@@ -712,6 +831,10 @@ function PlayerState.GetFromDict(player: Player, dictPath: DictPath, key: string
 end
 
 function PlayerState.RemoveFromDict(player: Player, dictPath: DictPath, key: string | number): boolean
+	if not _CanMutatePlayerData(player) then
+		return false
+	end
+
 	local replica = _GetPlayerReplica(player)
 
 	if not replica then
@@ -797,6 +920,10 @@ function PlayerState.SetOfflineData(userId: number, path: string, value: any): b
 end
 
 function PlayerState.WipePlayerData(player: Player): boolean
+	if not _CanMutatePlayerData(player) then
+		return false
+	end
+
 	return DataWipe.WipePlayerData(
 		player,
 		CONFIG,
@@ -842,6 +969,11 @@ function PlayerState.Increment(player: Player, path: ValuePath, amount: number?)
 		print("[PlayerState] Invalid player for Increment")
 		return false
 	end
+
+	if not _CanMutatePlayerData(player) then
+		return false
+	end
+
 	local currentValue = PlayerState.GetPath(player, path)
 	if typeof(currentValue) ~= "number" then
 		warn(`[PlayerState] Cannot increment non-numeric value at path: {path}`)
@@ -936,6 +1068,7 @@ Players.PlayerRemoving:Connect(function(player)
 		profiles[player]:EndSession()
 		profiles[player] = nil
 	end
+	loadedProfileUserIds[player] = nil
 
 	if replicas[player] then
 		replicas[player]:Destroy()
