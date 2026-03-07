@@ -418,6 +418,8 @@ function PlayerState.Init(player: Player, existingData: PlayerData?): boolean
 			DataUtils.CleanData(prof.Data, CONFIG.Profile.Template)
 		end
 
+		DataUtils.RemoveRuntimeLeaderboardData(prof.Data)
+
 		return prof
 	end
 

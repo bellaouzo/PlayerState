@@ -46,4 +46,29 @@ function DataUtils.CleanData(data: any, template: any): ()
 	end
 end
 
+function DataUtils.RemoveRuntimeLeaderboardData(data: any): boolean
+	if typeof(data) ~= "table" then
+		return false
+	end
+
+	local removed = false
+
+	if data._LeaderboardRanks ~= nil then
+		data._LeaderboardRanks = nil
+		removed = true
+	end
+
+	if data._Leaderboards ~= nil then
+		data._Leaderboards = nil
+		removed = true
+	end
+
+	if data._Leaderboard ~= nil then
+		data._Leaderboard = nil
+		removed = true
+	end
+
+	return removed
+end
+
 return DataUtils

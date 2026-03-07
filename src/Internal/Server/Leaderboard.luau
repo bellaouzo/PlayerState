@@ -229,8 +229,6 @@ local function CreateLeaderboardModule(
 		if onAfterSave and onAfterSave.Connect then
 			onAfterSave:Connect(restoreSavedLeaderboardRanks)
 		end
-
-		profile.OnSessionEnd:Connect(restoreSavedLeaderboardRanks)
 	end
 
 	local function SyncPlayerLeaderboardRanks(): ()
