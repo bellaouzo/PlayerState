@@ -1,6 +1,7 @@
 --!strict
 
 local Players = game:GetService("Players")
+local DataUtils = require(script.Parent.DataUtils)
 
 local OfflineData = {}
 
@@ -85,6 +86,8 @@ function OfflineData.SetOfflineData(
 	profile:Reconcile()
 
 	cleanData(profile.Data, config.Profile.Template)
+	local runtimeRoots = DataUtils.ResolveRuntimeNonPersistentRoots(config.RuntimeNonPersistentRoots)
+	DataUtils.RemoveRuntimeRoots(profile.Data, runtimeRoots)
 
 	local setSuccess = pcall(function()
 		if not string.find(path, ".", 1, true) then
@@ -113,7 +116,9 @@ function OfflineData.SetOfflineData(
 		return false
 	end
 
+	local capturedRuntimeData = DataUtils.CaptureAndRemoveRuntimeRoots(profile.Data, runtimeRoots)
 	profile:Save()
+	DataUtils.RestoreRuntimeRoots(profile.Data, capturedRuntimeData)
 	profile:EndSession()
 
 	print(`[PlayerState] Successfully set offline data for user {userId}: {path} = {value}`)

@@ -1,6 +1,7 @@
 --!strict
 
 local Players = game:GetService("Players")
+local DataUtils = require(script.Parent.DataUtils)
 
 local DataWipe = {}
 
@@ -112,7 +113,10 @@ function DataWipe.WipeOfflinePlayerData(
 		return false
 	end
 
+	local runtimeRoots = DataUtils.ResolveRuntimeNonPersistentRoots(config.RuntimeNonPersistentRoots)
+	local capturedRuntimeData = DataUtils.CaptureAndRemoveRuntimeRoots(profile.Data, runtimeRoots)
 	profile:Save()
+	DataUtils.RestoreRuntimeRoots(profile.Data, capturedRuntimeData)
 	profile:EndSession()
 
 	print(`[PlayerState] Successfully wiped offline data for userId {userId}`)

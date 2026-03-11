@@ -25,11 +25,38 @@ local Config = {
 			Scope = "Production",
 		},
 
+		-- Check documentation migration instructions for info
+		LegacyDataStore = {
+			enabled = false,
+			store = "OldStore",
+			strategy = "Auto", -- Auto | Overwrite | KeepNew | Manual | ContinuousOverwrite
+			keys = {
+				"{UserId}",
+				"PlayerData_{UserId}",
+			},
+			advanced = {
+				scope = nil,
+				marker = {
+					path = "_Migration.LegacyDataStoreV1",
+					writeOnNoData = true,
+				},
+				payload = {
+					mode = "auto", -- auto | profileStore
+				},
+				manual = {
+					transform = nil, -- function(legacyData, template, player) -> table
+				},
+				fetch = {
+					custom = nil, -- function(keyCandidates, userId, player) -> payload, keyUsed
+				},
+			},
+		},
+
 		-- Allows you to load another user's data profile in Studio for debugging purposes
 		ViewedUser = {
 			-- Studio-only debug profile override:
 			-- 0 = disabled, any other value loads that user's profile key in Studio
-			ViewedUserId = 650756220,
+			ViewedUserId = 0,
 
 			-- If true, blocks all data mutation APIs while viewing another user's data
 			ReadOnly = true,
@@ -44,6 +71,13 @@ local Config = {
 
 		-- How long to wait for player data to load before timing out (in seconds)
 		DataWaitTimeout = 10,
+
+		RuntimeNonPersistentRoots = {
+			"session",
+			"_LeaderboardRanks",
+			"_Leaderboards",
+			"_Leaderboard",
+		},
 
 		-- Batch processing settings
 		BatchDelay = 0.03,      -- Seconds to wait before processing batch (lower = faster, higher = more efficient)

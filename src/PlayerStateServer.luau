@@ -31,6 +31,7 @@ local Leaderstats = require(script.Parent.Internal.Server.Leaderstats)
 local CreateLeaderboardModule = require(script.Parent.Internal.Server.Leaderboard)
 local OfflineData = require(script.Parent.Internal.Server.OfflineData)
 local DataWipe = require(script.Parent.Internal.Server.DataWipe)
+local LegacyMigration = require(script.Parent.Internal.Server.LegacyMigration)
 
 export type PlayerData = typeof(DefaultData)
 
@@ -69,6 +70,8 @@ export type LeaderboardEntry = {
 	rank: number,
 }
 
+export type MigrationResultInfo = LegacyMigration.MigrationResult
+
 export type PlayerStateServer = {
 	SaveData: (player: Player) -> boolean,
 	Init: (player: Player, existingData: PlayerData?) -> boolean,
@@ -105,6 +108,7 @@ export type PlayerStateServer = {
 	BeforeSave: BeforeSaveSignal,
 	ProfileLoaded: ProfileLoadedSignal,
 	ProfileUnloaded: ProfileUnloadedSignal,
+	MigrationResult: MigrationResultSignal,
 }
 
 export type Connection = {
@@ -130,9 +134,15 @@ export type ProfileUnloadedSignal = {
 	Fire: (self: ProfileUnloadedSignal, player: Player, data: PlayerData) -> (),
 	GetListenerCount: (self: ProfileUnloadedSignal) -> (number),
 }
+export type MigrationResultSignal = {
+	Connect: (self: MigrationResultSignal, listener: (player: Player, result: MigrationResultInfo, data: PlayerData) -> ()) -> (Connection),
+	Fire: (self: MigrationResultSignal, player: Player, result: MigrationResultInfo, data: PlayerData) -> (),
+	GetListenerCount: (self: MigrationResultSignal) -> (number),
+}
 
 local CONFIG = Config.Server
 local AUTO_CLONE_TABLES = CONFIG.AutoCloneTables
+local RUNTIME_NON_PERSISTENT_ROOTS = DataUtils.ResolveRuntimeNonPersistentRoots(CONFIG.RuntimeNonPersistentRoots)
 
 if CONFIG.Leaderboard and CONFIG.Leaderboard.SyncInterval and CONFIG.Leaderboard.SyncInterval < 60 then
 	warn("[PlayerState] SyncInterval should be >= 60 seconds for optimal performance. Setting to 60.")
@@ -149,6 +159,7 @@ local profileStore: ProfileStoreInstance
 local BeforeSave = Signal.New() :: BeforeSaveSignal
 local ProfileLoaded = Signal.New() :: ProfileLoadedSignal
 local ProfileUnloaded = Signal.New() :: ProfileUnloadedSignal
+local MigrationResult = Signal.New() :: MigrationResultSignal
 
 local PathCacheModule = CreatePathCache(CONFIG.MaxCacheSize)
 local GetPathKeys = PathCacheModule.GetPathKeys
@@ -192,6 +203,10 @@ end
 LeaderboardModule.InitializeLeaderboards()
 
 local PlayerState: PlayerStateServer = {} :: PlayerStateServer
+
+local function _SetupRuntimeSaveProtection(profile: ProfileStoreProfile): ()
+	DataUtils.AttachRuntimeSaveProtection(profile, RUNTIME_NON_PERSISTENT_ROOTS)
+end
 
 local function _WaitForPlayerData(player: Player, maxWaitTime: number?): boolean
 	local waitTime: number = maxWaitTime or CONFIG.DataWaitTimeout or 10
@@ -352,7 +367,7 @@ function PlayerState.Init(player: Player, existingData: PlayerData?): boolean
 		profiles[player] = profile
 		loadedProfileUserIds[player] = effectiveProfileUserId
 
-		LeaderboardModule.SetupLeaderboardRankSaveProtection(profile)
+		_SetupRuntimeSaveProtection(profile)
 
 		if replicas[player] then
 			pcall(replicas[player].Destroy, replicas[player])
@@ -418,7 +433,22 @@ function PlayerState.Init(player: Player, existingData: PlayerData?): boolean
 			DataUtils.CleanData(prof.Data, CONFIG.Profile.Template)
 		end
 
-		DataUtils.RemoveRuntimeLeaderboardData(prof.Data)
+		local migrationResult = LegacyMigration.TryMigrateProfile(
+			prof.Data,
+			CONFIG.Profile.Template,
+			effectiveProfileUserId,
+			player,
+			CONFIG.LegacyDataStore,
+			RUNTIME_NON_PERSISTENT_ROOTS
+		)
+
+		if migrationResult.applied and CONFIG.CleanExtraFields then
+			DataUtils.CleanData(prof.Data, CONFIG.Profile.Template)
+		end
+
+		DataUtils.RemoveRuntimeRoots(prof.Data, RUNTIME_NON_PERSISTENT_ROOTS)
+		DataUtils.ApplyRuntimeRootDefaults(prof.Data, CONFIG.Profile.Template, RUNTIME_NON_PERSISTENT_ROOTS)
+		MigrationResult:Fire(player, migrationResult, prof.Data)
 
 		return prof
 	end
@@ -903,6 +933,11 @@ function PlayerState.GetOfflineData(userId: number): PlayerData?
 end
 
 function PlayerState.SetOfflineData(userId: number, path: string, value: any): boolean
+	if DataUtils.IsPathInRuntimeRoots(path, RUNTIME_NON_PERSISTENT_ROOTS) then
+		warn(`[PlayerState] Cannot set offline value for runtime-only path "{path}"`)
+		return false
+	end
+
 	return OfflineData.SetOfflineData(
 		userId,
 		path,
@@ -1103,5 +1138,6 @@ end)
 PlayerState.BeforeSave = BeforeSave
 PlayerState.ProfileLoaded = ProfileLoaded
 PlayerState.ProfileUnloaded = ProfileUnloaded
+PlayerState.MigrationResult = MigrationResult
 
 return PlayerState
