@@ -239,6 +239,9 @@ export type Replica = {
 	IsActive: (self: any) -> (boolean),
 	BeginBatch: (self: any) -> (),
 	EndBatch: (self: any) -> (),
+	OnChange: (self: any, listener: (action: string, path: {any}, param1: any, param2: any) -> ()) -> ({Disconnect: (self: any) -> ()}),
+	OnSet: (self: any, path: {any}, listener: (action: string, path: {any}, param1: any, param2: any) -> ()) -> ({Disconnect: (self: any) -> ()}),
+	OnPath: (self: any, path: {any}, include_descendants: boolean, listener: (action: string, path: {any}, param1: any, param2: any) -> ()) -> ({Disconnect: (self: any) -> ()}),
 	Destroy: (self: any) -> (),
 }
 
@@ -321,6 +324,11 @@ function Replica.New(params: {Token: typeof(ReplicaToken), Tags: {}?, Data: {}?,
 		
 		_batchMode = false,
 		_batchQueue = {},
+		global_changed_listeners = {},
+		exact_path_listeners = {},
+		prefix_path_listeners = {},
+		change_listener_count = 0,
+		has_change_listeners = false,
 		
 	}, Replica)
 	
@@ -328,6 +336,126 @@ function Replica.New(params: {Token: typeof(ReplicaToken), Tags: {}?, Data: {}?,
 	
 	return self
 	
+end
+
+local function PathSegmentToKey(segment: any): string
+	local segment_type = typeof(segment)
+	if segment_type == "string" then
+		return "s:" .. segment
+	elseif segment_type == "number" then
+		return "n:" .. tostring(segment)
+	end
+	return segment_type .. ":" .. tostring(segment)
+end
+
+local function PathToKey(path: {any}): string
+	local size = #path
+	if size == 0 then
+		return ""
+	end
+	local key_parts = table.create(size)
+	for index = 1, size do
+		key_parts[index] = PathSegmentToKey(path[index])
+	end
+	return table.concat(key_parts, "\0")
+end
+
+local function DispatchListenerSet(listener_set: {[any]: (action: string, path: {any}, param1: any, param2: any) -> ()}, action: string, path: {any}, param1: any, param2: any)
+	for _, listener in pairs(listener_set) do
+		task.spawn(listener, action, path, param1, param2)
+	end
+end
+
+local function AddGlobalChangeListener(self: Replica, listener: (action: string, path: {any}, param1: any, param2: any) -> ()): {Disconnect: (self: any) -> ()}
+	local replica = self
+	local listener_key = {}
+	local listener_set = replica.global_changed_listeners
+	listener_set[listener_key] = listener
+	replica.change_listener_count += 1
+	replica.has_change_listeners = true
+
+	local active = true
+	local connection = {}
+	function connection:Disconnect()
+		if active == false then
+			return
+		end
+		active = false
+		if listener_set[listener_key] ~= nil then
+			listener_set[listener_key] = nil
+			replica.change_listener_count -= 1
+			replica.has_change_listeners = replica.change_listener_count > 0
+		end
+	end
+	return connection
+end
+
+local function AddPathChangeListener(
+	self: Replica,
+	path_listeners: {[string]: {[any]: (action: string, path: {any}, param1: any, param2: any) -> ()}},
+	path_key: string,
+	listener: (action: string, path: {any}, param1: any, param2: any) -> ()
+): {Disconnect: (self: any) -> ()}
+	local replica = self
+	local listener_set = path_listeners[path_key]
+	if listener_set == nil then
+		listener_set = {}
+		path_listeners[path_key] = listener_set
+	end
+
+	local listener_key = {}
+	listener_set[listener_key] = listener
+	replica.change_listener_count += 1
+	replica.has_change_listeners = true
+
+	local active = true
+	local connection = {}
+	function connection:Disconnect()
+		if active == false then
+			return
+		end
+		active = false
+		if listener_set[listener_key] ~= nil then
+			listener_set[listener_key] = nil
+			if next(listener_set) == nil then
+				path_listeners[path_key] = nil
+			end
+			replica.change_listener_count -= 1
+			replica.has_change_listeners = replica.change_listener_count > 0
+		end
+	end
+	return connection
+end
+
+local function DispatchChange(self: Replica, action: string, path: {any}, param1: any, param2: any)
+	if self.has_change_listeners ~= true then
+		return
+	end
+
+	local path_key = PathToKey(path)
+	local exact_set = self.exact_path_listeners[path_key]
+	if exact_set ~= nil then
+		DispatchListenerSet(exact_set, action, path, param1, param2)
+	end
+
+	if #path > 1 then
+		local key_parts = table.create(#path)
+		for index = 1, #path do
+			key_parts[index] = PathSegmentToKey(path[index])
+		end
+		for index = 1, #key_parts - 1 do
+			local ancestor_key = table.concat(key_parts, "\0", 1, index)
+			local prefix_set = self.prefix_path_listeners[ancestor_key]
+			if prefix_set ~= nil then
+				DispatchListenerSet(prefix_set, action, path, param1, param2)
+			end
+		end
+	end
+
+	local global_set = self.global_changed_listeners
+	if next(global_set) ~= nil then
+		DispatchListenerSet(global_set, action, path, param1, param2)
+	end
 end
 
 function Replica.FromId(id: number): Replica
@@ -351,6 +479,7 @@ function Replica:Set(path: {string}, value: any)
 	for i = 1, #path - 1 do
 		pointer = pointer[path[i]]
 	end
+	local old_value = pointer[path[#path]]
 	pointer[path[#path]] = value
 	
 	-- Replicate change:
@@ -377,6 +506,8 @@ function Replica:Set(path: {string}, value: any)
 			end
 		end
 	end
+
+	DispatchChange(self, "Set", path, value, old_value)
 	
 end
 
@@ -416,6 +547,8 @@ function Replica:SetValues(path: {string}, values: {[string]: any})
 			end
 		end
 	end
+
+	DispatchChange(self, "SetValues", path, values, nil)
 	
 end
 
@@ -432,6 +565,7 @@ function Replica:TableInsert(path: {string}, value: any, index: number?): number
 	else
 		table.insert(pointer, value)
 	end
+	local inserted_index = index or #pointer
 	
 	-- Replicate change:
 	
@@ -449,8 +583,10 @@ function Replica:TableInsert(path: {string}, value: any, index: number?): number
 			end
 		end
 	end
+
+	DispatchChange(self, "TableInsert", path, value, inserted_index)
 	
-	return index or #pointer
+	return inserted_index
 	
 end
 
@@ -480,9 +616,58 @@ function Replica:TableRemove(path: {string}, index: number): any
 			end
 		end
 	end
+
+	DispatchChange(self, "TableRemove", path, removed_value, index)
 	
 	return removed_value
 	
+end
+
+function Replica:OnChange(listener: (action: string, path: {any}, param1: any, param2: any) -> ())
+	if type(listener) ~= "function" then
+		error(`[{script.Name}]: "listener" must be a function`)
+	end
+	return AddGlobalChangeListener(self, listener)
+end
+
+function Replica:OnSet(path: {any}, listener: (action: string, path: {any}, param1: any, param2: any) -> ())
+	if type(path) ~= "table" then
+		error(`[{script.Name}]: "path" must be a table`)
+	elseif type(listener) ~= "function" then
+		error(`[{script.Name}]: "listener" must be a function`)
+	end
+	return AddPathChangeListener(self, self.exact_path_listeners, PathToKey(path), listener)
+end
+
+function Replica:OnPath(path: {any}, include_descendants: boolean, listener: (action: string, path: {any}, param1: any, param2: any) -> ())
+	if type(path) ~= "table" then
+		error(`[{script.Name}]: "path" must be a table`)
+	elseif type(include_descendants) ~= "boolean" then
+		error(`[{script.Name}]: "include_descendants" must be a boolean`)
+	elseif type(listener) ~= "function" then
+		error(`[{script.Name}]: "listener" must be a function`)
+	end
+
+	if include_descendants == false then
+		return AddPathChangeListener(self, self.exact_path_listeners, PathToKey(path), listener)
+	end
+
+	local path_key = PathToKey(path)
+	local exact_connection = AddPathChangeListener(self, self.exact_path_listeners, path_key, listener)
+	local prefix_connection = AddPathChangeListener(self, self.prefix_path_listeners, path_key, listener)
+	local active = true
+
+	local connection = {}
+	function connection:Disconnect()
+		if active == false then
+			return
+		end
+		active = false
+		exact_connection:Disconnect()
+		prefix_connection:Disconnect()
+	end
+
+	return connection
 end
 
 function Replica:Write(function_name: string, ...): ...any

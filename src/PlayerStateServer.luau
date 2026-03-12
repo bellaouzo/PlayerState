@@ -52,6 +52,12 @@ export type ReplicaInstance = ReplicaServer.Replica
 export type ArrayPath = string
 export type DictPath = string  
 export type ValuePath = string
+export type ChangeInfo = {
+	action: "Set" | "SetValues" | "TableInsert" | "TableRemove",
+	path: {any},
+	index: number?,
+}
+export type ChangeCallback = (newValue: any, oldValue: any, info: ChangeInfo | {any}?) -> ()
 
 export type BatchOperation = {
 	path: ValuePath,
@@ -79,6 +85,7 @@ export type PlayerStateServer = {
 	Get: (player: Player, key: string) -> any,
 	SetPath: (player: Player, path: ValuePath, value: any) -> boolean,
 	GetPath: (player: Player, path: ValuePath) -> any,
+	OnChanged: (player: Player, pathOrKey: string, callback: ChangeCallback) -> Connection?,
 	SetValues: (player: Player, values: {[string]: any}) -> boolean,
 	BatchSetValues: (player: Player, operations: {BatchOperation}) -> boolean,
 	BatchUpdateValues: (player: Player, operations: {BatchUpdateOperation}) -> boolean,
@@ -153,6 +160,7 @@ end
 local replicas: { [Player]: ReplicaInstance } = {}
 local profiles: { [Player]: ProfileStoreProfile } = {}
 local loadedProfileUserIds: {[Player]: number} = {}
+local mutationBlockedByPlayer: {[Player]: boolean} = {}
 local initInFlight: {[number]: boolean} = {}
 local profileStore: ProfileStoreInstance
 
@@ -313,24 +321,21 @@ local function _ResolveEffectiveProfileUserId(player: Player): number
 	return viewedUserId
 end
 
-local function _IsViewingAnotherUser(player: Player): boolean
-	local loadedProfileUserId = loadedProfileUserIds[player]
-
-	return loadedProfileUserId ~= nil and loadedProfileUserId ~= player.UserId
-end
-
 local function _CanMutatePlayerData(player: Player): boolean
-	if not _IsViewingAnotherUser(player) then
+	if mutationBlockedByPlayer[player] ~= true then
 		return true
 	end
 
-	local _, readOnly = _ResolveViewedUserSettings()
-	if readOnly then
-		warn(`[PlayerState] Blocked write for {player.Name} while viewing user {loadedProfileUserIds[player]} (ReadOnly mode).`)
-		return false
+	warn(`[PlayerState] Blocked write for {player.Name} while viewing user {loadedProfileUserIds[player]} (ReadOnly mode).`)
+	return false
+end
+
+local function _GetWritableReplica(player: Player): ReplicaInstance?
+	if not _CanMutatePlayerData(player) then
+		return nil
 	end
 
-	return true
+	return _GetPlayerReplica(player)
 end
 
 function PlayerState.Init(player: Player, existingData: PlayerData?): boolean
@@ -356,16 +361,24 @@ function PlayerState.Init(player: Player, existingData: PlayerData?): boolean
 	local effectiveProfileUserId = _ResolveEffectiveProfileUserId(player)
 	local profileKey = CONFIG.Profile.Key .. "_" .. effectiveProfileUserId
 	local _, viewedReadOnly = _ResolveViewedUserSettings()
+	local isViewingAnotherUser = effectiveProfileUserId ~= player.UserId
+	local isMutationBlocked = isViewingAnotherUser and viewedReadOnly
 
-	if effectiveProfileUserId ~= player.UserId then
+	if isViewingAnotherUser then
 		local viewedModeLabel = if viewedReadOnly then "read-only" else "writable"
+		local viewedUserDisplay = tostring(effectiveProfileUserId)
+		local ok, viewedUsername = pcall(Players.GetNameFromUserIdAsync, Players, effectiveProfileUserId)
+		if ok and type(viewedUsername) == "string" then
+			viewedUserDisplay = `{viewedUsername} ({effectiveProfileUserId})`
+		end
 		
-		print(`[PlayerState] {player.Name} is loading viewed profile {effectiveProfileUserId} ({viewedModeLabel}).`)
+		print(`[PlayerState] {player.Name} is loading viewed profile {viewedUserDisplay} ({viewedModeLabel}).`)
 	end
 
 	local function attach(profile: ProfileStoreProfile)
 		profiles[player] = profile
 		loadedProfileUserIds[player] = effectiveProfileUserId
+		mutationBlockedByPlayer[player] = isMutationBlocked
 
 		_SetupRuntimeSaveProtection(profile)
 
@@ -503,11 +516,7 @@ end
 
 
 function PlayerState.Set(player: Player, key: string, value: any): boolean
-	if not _CanMutatePlayerData(player) then
-		return false
-	end
-
-	local replica = _GetPlayerReplica(player)
+	local replica = _GetWritableReplica(player)
 
 	if not replica then
 		return false
@@ -568,11 +577,7 @@ function PlayerState.Clone(value: any, deep: boolean?): any
 end
 
 function PlayerState.SetPath(player: Player, path: ValuePath, value: any): boolean
-	if not _CanMutatePlayerData(player) then
-		return false
-	end
-
-	local replica = _GetPlayerReplica(player)
+	local replica = _GetWritableReplica(player)
 
 	if not replica then
 		return false
@@ -633,12 +638,76 @@ function PlayerState.GetPath(player: Player, path: ValuePath): any
 	return result
 end
 
-function PlayerState.SetValues(player: Player, values: {[string]: any}): boolean
-	if not _CanMutatePlayerData(player) then
-		return false
+function PlayerState.OnChanged(player: Player, pathOrKey: string, callback: ChangeCallback): Connection?
+	if not Validation.ValidatePlayer(player) then
+		return nil
+	end
+
+	if type(pathOrKey) ~= "string" then
+		warn("[PlayerState] OnChanged pathOrKey must be a string")
+		return nil
+	end
+
+	if type(callback) ~= "function" then
+		warn("[PlayerState] OnChanged callback must be a function")
+		return nil
 	end
 
 	local replica = _GetPlayerReplica(player)
+	if not replica then
+		return nil
+	end
+
+	if pathOrKey == "." then
+		return replica:OnChange(function(action, path, param1, param2)
+			if action == "Set" then
+				local newValue, oldValue = param1, param2
+				callback(newValue, oldValue, {action = action, path = path})
+			elseif action == "SetValues" then
+				local values = param1
+				callback(values, nil, {action = action, path = path})
+			elseif action == "TableInsert" then
+				local value, index = param1, param2
+				callback(value, nil, {action = action, path = path, index = index})
+			elseif action == "TableRemove" then
+				local removedValue, index = param1, param2
+				callback(nil, removedValue, {action = action, path = path, index = index})
+			end
+		end)
+	end
+
+	local pathKeys = GetPathKeys(pathOrKey)
+	return replica:OnPath(pathKeys, true, function(action, path, param1, param2)
+		local isExactMatch = #path == #pathKeys
+
+		if action == "Set" then
+			if isExactMatch then
+				local newValue, oldValue = param1, param2
+				callback(newValue, oldValue, pathKeys)
+			else
+				callback(PlayerState.GetPath(player, pathOrKey), nil, {action = action, path = path})
+			end
+		elseif action == "SetValues" then
+			if isExactMatch then
+				local values = param1
+				callback(values, nil, {action = action, path = path})
+			else
+				callback(PlayerState.GetPath(player, pathOrKey), nil, {action = action, path = path})
+			end
+		elseif action == "TableInsert" then
+			local value, index = param1, param2
+			
+			callback(value, nil, {action = action, path = path, index = index})
+		elseif action == "TableRemove" then
+			local removedValue, index = param1, param2
+
+			callback(nil, removedValue, {action = action, path = path, index = index})
+		end
+	end)
+end
+
+function PlayerState.SetValues(player: Player, values: {[string]: any}): boolean
+	local replica = _GetWritableReplica(player)
 
 	if not replica then
 		return false
@@ -671,7 +740,7 @@ function PlayerState.BatchSetValues(player: Player, operations: {BatchOperation}
 		return false
 	end
 
-	if not _CanMutatePlayerData(player) then
+	if not _GetWritableReplica(player) then
 		return false
 	end
 
@@ -692,11 +761,7 @@ function PlayerState.BatchUpdateValues(player: Player, operations: {BatchUpdateO
 		return false
 	end
 
-	if not _CanMutatePlayerData(player) then
-		return false
-	end
-
-	local replica = _GetPlayerReplica(player)
+	local replica = _GetWritableReplica(player)
 	if not replica then
 		return false
 	end
@@ -741,7 +806,7 @@ function PlayerState.FlushBatch(player: Player): boolean
 		return false
 	end
 
-	if not _CanMutatePlayerData(player) then
+	if not _GetWritableReplica(player) then
 		return false
 	end
 
@@ -750,11 +815,7 @@ function PlayerState.FlushBatch(player: Player): boolean
 end
 
 function PlayerState.AddToArray(player: Player, arrayPath: ArrayPath, item: any): boolean
-	if not _CanMutatePlayerData(player) then
-		return false
-	end
-
-	local replica = _GetPlayerReplica(player)
+	local replica = _GetWritableReplica(player)
 
 	if not replica then
 		return false
@@ -771,11 +832,7 @@ function PlayerState.AddToArray(player: Player, arrayPath: ArrayPath, item: any)
 end
 
 function PlayerState.RemoveFromArray(player: Player, arrayPath: ArrayPath, index: number): boolean
-	if not _CanMutatePlayerData(player) then
-		return false
-	end
-
-	local replica = _GetPlayerReplica(player)
+	local replica = _GetWritableReplica(player)
 
 	if not replica then
 		return false
@@ -792,11 +849,7 @@ function PlayerState.RemoveFromArray(player: Player, arrayPath: ArrayPath, index
 end
 
 function PlayerState.UpdateArrayItem(player: Player, arrayPath: ArrayPath, index: number, newItem: any): boolean
-	if not _CanMutatePlayerData(player) then
-		return false
-	end
-
-	local replica = _GetPlayerReplica(player)
+	local replica = _GetWritableReplica(player)
 
 	if not replica then
 		return false
@@ -813,11 +866,7 @@ function PlayerState.UpdateArrayItem(player: Player, arrayPath: ArrayPath, index
 end
 
 function PlayerState.SetInDict(player: Player, dictPath: DictPath, key: string | number, value: any): boolean
-	if not _CanMutatePlayerData(player) then
-		return false
-	end
-
-	local replica = _GetPlayerReplica(player)
+	local replica = _GetWritableReplica(player)
 
 	if not replica then
 		return false
@@ -863,11 +912,7 @@ function PlayerState.GetFromDict(player: Player, dictPath: DictPath, key: string
 end
 
 function PlayerState.RemoveFromDict(player: Player, dictPath: DictPath, key: string | number): boolean
-	if not _CanMutatePlayerData(player) then
-		return false
-	end
-
-	local replica = _GetPlayerReplica(player)
+	local replica = _GetWritableReplica(player)
 
 	if not replica then
 		return false
@@ -957,7 +1002,7 @@ function PlayerState.SetOfflineData(userId: number, path: string, value: any): b
 end
 
 function PlayerState.WipePlayerData(player: Player): boolean
-	if not _CanMutatePlayerData(player) then
+	if not _GetWritableReplica(player) then
 		return false
 	end
 
@@ -1007,7 +1052,7 @@ function PlayerState.Increment(player: Player, path: ValuePath, amount: number?)
 		return false
 	end
 
-	if not _CanMutatePlayerData(player) then
+	if not _GetWritableReplica(player) then
 		return false
 	end
 
@@ -1106,6 +1151,7 @@ Players.PlayerRemoving:Connect(function(player)
 		profiles[player] = nil
 	end
 	loadedProfileUserIds[player] = nil
+	mutationBlockedByPlayer[player] = nil
 
 	if replicas[player] then
 		replicas[player]:Destroy()
