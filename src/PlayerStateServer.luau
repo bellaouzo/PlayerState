@@ -157,12 +157,24 @@ if CONFIG.Leaderboard and CONFIG.Leaderboard.SyncInterval and CONFIG.Leaderboard
 	CONFIG.Leaderboard.SyncInterval = 60
 end
 
+if CONFIG.Leaderboard then
+	local lb = CONFIG.Leaderboard :: any
+	if lb.FullLeaderboardWriteInterval == nil and type(lb.ReconcileInterval) == "number" then
+		lb.FullLeaderboardWriteInterval = lb.ReconcileInterval
+	end
+	if type(lb.FullLeaderboardWriteInterval) == "number" and lb.FullLeaderboardWriteInterval > 0 and lb.FullLeaderboardWriteInterval < 60 then
+		warn("[PlayerState] FullLeaderboardWriteInterval should be >= 60 seconds when enabled. Setting to 60.")
+		lb.FullLeaderboardWriteInterval = 60
+	end
+end
+
 local replicas: { [Player]: ReplicaInstance } = {}
 local profiles: { [Player]: ProfileStoreProfile } = {}
 local loadedProfileUserIds: {[Player]: number} = {}
 local mutationBlockedByPlayer: {[Player]: boolean} = {}
 local initInFlight: {[number]: boolean} = {}
 local profileStore: ProfileStoreInstance
+local leaderboardPeriodicStarted = false
 
 local BeforeSave = Signal.New() :: BeforeSaveSignal
 local ProfileLoaded = Signal.New() :: ProfileLoadedSignal
@@ -177,15 +189,6 @@ local function GetNestedValue(data: any, path: string): any
 	return DataUtils.GetNestedValue(data, keys)
 end
 
-local BatchModule = CreateBatchModule(
-	CONFIG,
-	GetPathKeys,
-	Validation.ValidateReplica,
-	function(player: Player)
-		return replicas[player]
-	end
-)
-
 local LeaderboardModule = CreateLeaderboardModule(
 	CONFIG,
 	Validation.ValidatePlayer,
@@ -194,6 +197,31 @@ local LeaderboardModule = CreateLeaderboardModule(
 		return replicas
 	end,
 	GetNestedValue
+)
+
+local BatchModule = CreateBatchModule(
+	CONFIG,
+	GetPathKeys,
+	Validation.ValidateReplica,
+	function(player: Player)
+		return replicas[player]
+	end,
+	function(player: Player, operations: {BatchOperation})
+		if not CONFIG.Leaderboard or not CONFIG.Leaderboard.Enabled then
+			return
+		end
+
+		local replica = replicas[player]
+		if not replica then
+			return
+		end
+
+		for _, op in operations do
+			if LeaderboardModule.IsStatTracked(op.path) and typeof(op.value) == "number" then
+				LeaderboardModule.UpdateReplicaLeaderboardScore(replica, op.path, op.value :: number)
+			end
+		end
+	end
 )
 
 local PlayerDataToken = ReplicaServer.Token("PlayerData")
@@ -422,7 +450,11 @@ function PlayerState.Init(player: Player, existingData: PlayerData?): boolean
 		)
 
 		if CONFIG.Leaderboard.Enabled then
-			LeaderboardModule.StartPeriodicUpdates()
+			if not leaderboardPeriodicStarted then
+				leaderboardPeriodicStarted = true
+				LeaderboardModule.StartPeriodicUpdates()
+			end
+			LeaderboardModule.EnqueueTrackedStatsFromReplica(replica)
 		end
 
 		ProfileLoaded:Fire(player, profile.Data)
@@ -769,7 +801,8 @@ function PlayerState.BatchUpdateValues(player: Player, operations: {BatchUpdateO
 	local batchOperations: {BatchOperation} = {}
 
 	for _, op in operations do
-		local currentValue = PlayerState.GetPath(player, op.path)
+		local opKeys = GetPathKeys(op.path)
+		local currentValue = DataUtils.GetNestedValue(replica.Data, opKeys)
 
 		if typeof(currentValue) ~= "number" then
 			warn(`[PlayerState] Cannot {op.operation} non-numeric value at path: {op.path}`)
@@ -873,19 +906,23 @@ function PlayerState.SetInDict(player: Player, dictPath: DictPath, key: string |
 	end
 
 	local stringKey = if typeof(key) == "number" then tostring(key) else key
-	local currentDict = PlayerState.GetPath(player, dictPath)
+	local pathKeys = GetPathKeys(dictPath)
+	local prior = DataUtils.GetNestedValue(replica.Data, pathKeys)
 
-	if not currentDict or typeof(currentDict) ~= "table" then
-		warn(`[PlayerState] Created new dictionary at path "{dictPath}" for {player.Name}`)
-		currentDict = {}
+	if prior ~= nil and typeof(prior) ~= "table" then
+		warn(`[PlayerState] SetInDict path "{dictPath}" is not a dictionary for {player.Name}`)
+		return false
 	end
 
-	local pathKeys = GetPathKeys(dictPath)
-	local success = DictOps.SetInDict(replica, pathKeys, currentDict, stringKey, value)
+	local success = DictOps.SetInDict(replica, pathKeys, stringKey, value)
 
 	if not success then
 		warn(`[PlayerState] SetInDict operation failed for {player.Name}`)
 		return false
+	end
+
+	if prior == nil then
+		warn(`[PlayerState] Created new dictionary at path "{dictPath}" for {player.Name}`)
 	end
 
 	return true
@@ -919,11 +956,8 @@ function PlayerState.RemoveFromDict(player: Player, dictPath: DictPath, key: str
 	end
 
 	local stringKey = if typeof(key) == "number" then tostring(key) else key
-
-	local currentDict = PlayerState.GetPath(player, dictPath) or {}
-
 	local pathKeys = GetPathKeys(dictPath)
-	local success = DictOps.RemoveFromDict(replica, pathKeys, currentDict, stringKey)
+	local success = DictOps.RemoveFromDict(replica, pathKeys, stringKey)
 
 	if not success then
 		warn(`[PlayerState] RemoveFromDict failed - path is not a dictionary for {player.Name}`)
@@ -1052,11 +1086,13 @@ function PlayerState.Increment(player: Player, path: ValuePath, amount: number?)
 		return false
 	end
 
-	if not _GetWritableReplica(player) then
+	local replica = _GetWritableReplica(player)
+	if not replica then
 		return false
 	end
 
-	local currentValue = PlayerState.GetPath(player, path)
+	local pathKeys = GetPathKeys(path)
+	local currentValue = DataUtils.GetNestedValue(replica.Data, pathKeys)
 	if typeof(currentValue) ~= "number" then
 		warn(`[PlayerState] Cannot increment non-numeric value at path: {path}`)
 		return false
@@ -1085,17 +1121,7 @@ function PlayerState.UpdateLeaderboard(player: Player, statName: string, score: 
 		return false
 	end
 
-	if not Validation.ValidatePlayer(player) then
-		return false
-	end
-
-	local store = LeaderboardModule.GetLeaderboardInternal
-	if not store then
-		warn(`[PlayerState] No leaderboard store found for stat: {statName}`)
-		return false
-	end
-
-	return true
+	return PlayerState.SetPath(player, statName, score)
 end
 
 

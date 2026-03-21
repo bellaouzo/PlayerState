@@ -8,6 +8,8 @@
 
 local RunService = game:GetService("RunService")
 
+local dataReadyEvent = Instance.new("BindableEvent")
+
 local IS_CLIENT = RunService:IsClient()
 if not IS_CLIENT then
 	error("[PlayerStateClient] This module can only be used on the client")
@@ -71,6 +73,8 @@ ReplicaClient.OnNew("PlayerData", function(replica)
 
 	CacheModule.ClearAllCaches()
 
+	dataReadyEvent:Fire()
+
 	print("[PlayerState] Client data is ready")
 end)
 ReplicaClient.RequestData()
@@ -105,7 +109,8 @@ local function WaitForData(): boolean
 		Validation.ValidateReplica,
 		function()
 			return localReplica
-		end
+		end,
+		dataReadyEvent
 	)
 end
 
@@ -209,11 +214,31 @@ function PlayerState.GetFromDict(dictPath: ValuePath, key: string | number): any
 	end
 
 	local stringKey = if typeof(key) == "number" then tostring(key) else key
-	local currentDict = PlayerState.GetPath(dictPath) or {}
+
+	local replicaData = (localReplica :: ReplicaInstance).Data
+	local dictKeys = PathCacheModule.GetPathKeys(dictPath)
+	local current: any = replicaData
+
+	for _, segment in dictKeys do
+		if typeof(current) ~= "table" then
+			CacheModule.CleanupCache()
+			return nil
+		end
+		current = current[segment]
+		if current == nil then
+			CacheModule.CleanupCache()
+			return nil
+		end
+	end
+
+	if typeof(current) ~= "table" then
+		CacheModule.CleanupCache()
+		return nil
+	end
+
+	local result = current[stringKey]
 
 	CacheModule.CleanupCache()
-
-	local result = currentDict[stringKey]
 
 	if AUTO_CLONE_TABLES and typeof(result) == "table" then
 		return Utils.DeepClone(result)
@@ -268,7 +293,7 @@ function PlayerState.OnChanged(pathOrKey: string, callback: (newValue: any, oldV
 				end
 
 				if pathMatches then
-					CacheModule.ClearAllCaches()
+					CacheModule.InvalidateForMutationPath(path)
 
 					if action == "Set" then
 						if isExactMatch then

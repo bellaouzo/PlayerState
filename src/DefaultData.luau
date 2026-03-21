@@ -6,17 +6,16 @@ return {
 	Coins = 0,
 
 	-- Example table for default data
-	--[[
+	
 	Inventory = {
 		Pills = {}, -- [itemId] = {itemName = string, quantity = number}
 		Elixirs = {}, -- [itemId] = {itemName = string, quantity = number}
 	},
 
 	
-	Cultivation = {
-		Environment = "Normal",
-	},
-	--]]
+	--Cultivation = {
+	--	Environment = "Normal",
+	--},
 
 	-- Non-persistent data. Does not save on leave.
 	session = {

@@ -12,7 +12,13 @@ export type BatchModule = {
 	ClearPlayerBatch: (player: Player) -> (),
 }
 
-local function CreateBatchModule(config: any, getPathKeys: (path: string) -> {string}, validateReplica: (replica: any?) -> boolean, getReplica: (player: Player) -> any?): BatchModule
+local function CreateBatchModule(
+	config: any,
+	getPathKeys: (path: string) -> {string},
+	validateReplica: (replica: any?) -> boolean,
+	getReplica: (player: Player) -> any?,
+	onBatchCommitted: ((Player, {BatchOperation}) -> ())?
+): BatchModule
 	local batchOperations: {[Player]: {BatchOperation}} = {}
 	local batchScheduled: {[Player]: thread?} = {}
 
@@ -77,6 +83,12 @@ local function CreateBatchModule(config: any, getPathKeys: (path: string) -> {st
 		end
 
 		replica:EndBatch()
+
+		local committedOps = table.create(#playerBatch)
+		table.move(playerBatch, 1, #playerBatch, 1, committedOps)
+		if onBatchCommitted then
+			onBatchCommitted(player, committedOps)
+		end
 
 		batchOperations[player] = nil
 		batchScheduled[player] = nil
