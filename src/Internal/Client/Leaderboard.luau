@@ -28,11 +28,13 @@ end
 
 function Leaderboard.GetLeaderboardInfo(replica: any?, statName: string): LeaderboardInfo?
 	if not replica then
+		print("[Leaderboard] GetLeaderboardInfo failed: No replica")
 		return nil
 	end
 
 	local leaderboardRanks = (replica.Data :: any)._LeaderboardRanks
 	if typeof(leaderboardRanks) ~= "table" then
+		print("[Leaderboard] GetLeaderboardInfo failed: No leaderboard ranks")
 		return nil
 	end
 

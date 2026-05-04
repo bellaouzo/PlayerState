@@ -2,6 +2,7 @@
 
 local Players = game:GetService("Players")
 local DataUtils = require(script.Parent.DataUtils)
+local Utils = require(script.Parent.Parent.Shared.Utils)
 
 local DataWipe = {}
 
@@ -28,7 +29,7 @@ function DataWipe.WipePlayerData(
 	local success = pcall(function()
 		table.clear(profile.Data)
 		for key, value in config.Profile.Template do
-			profile.Data[key] = value
+			profile.Data[key] = if typeof(value) == "table" then Utils.DeepClone(value) else value
 		end
 	end)
 
@@ -103,7 +104,7 @@ function DataWipe.WipeOfflinePlayerData(
 
 	local wipeSuccess = pcall(function()
 		for key, value in config.Profile.Template do
-			profile.Data[key] = value
+			profile.Data[key] = if typeof(value) == "table" then Utils.DeepClone(value) else value
 		end
 	end)
 

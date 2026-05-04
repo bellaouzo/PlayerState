@@ -264,9 +264,7 @@ local function CreateLeaderboardModule(
 
 			local value = getNestedValue(replica.Data, statName)
 			if typeof(value) == "number" then
-				local storeValue = (value % 1 == 0) and value or math.floor(value)
-
-				EnqueueLeaderboardWrite(statName, store, userId, storeValue)
+				UpdateReplicaLeaderboardScore(replica, statName, value)
 			end
 		end
 	end

@@ -97,9 +97,11 @@ local Config = {
 				-- Examples: "coins", "level", "score", "Inventory.Pills"
 			},
 
-			-- How often to sync leaderboard data (in seconds)
+			-- How often to refresh each player's rank and top-100 list from DataStores (seconds, min 60)
 			SyncInterval = 60,
-			UpdateOnPlayerLeave = true, -- Always update leaderboards when player leaves
+			-- Full leaderboard write sweep (seconds): every online player × tracked stats. 0 = off; min 60 when enabled. Join, stat changes, leave, and shutdown still update scores.
+			FullLeaderboardWriteInterval = 600,
+			UpdateOnPlayerLeave = true,
 		},
 	},
 	

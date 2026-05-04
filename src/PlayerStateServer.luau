@@ -420,6 +420,10 @@ function PlayerState.Init(player: Player, existingData: PlayerData?): boolean
 		})
 		replicas[player] = replica
 
+		if CONFIG.Leaderboard.Enabled then
+			LeaderboardModule.EnqueueTrackedStatsFromReplica(replica)
+		end
+
 		if ReplicaServer.ReadyPlayers[player] then
 			replica:Subscribe(player)
 		else
@@ -454,7 +458,6 @@ function PlayerState.Init(player: Player, existingData: PlayerData?): boolean
 				leaderboardPeriodicStarted = true
 				LeaderboardModule.StartPeriodicUpdates()
 			end
-			LeaderboardModule.EnqueueTrackedStatsFromReplica(replica)
 		end
 
 		ProfileLoaded:Fire(player, profile.Data)
@@ -1211,5 +1214,10 @@ PlayerState.BeforeSave = BeforeSave
 PlayerState.ProfileLoaded = ProfileLoaded
 PlayerState.ProfileUnloaded = ProfileUnloaded
 PlayerState.MigrationResult = MigrationResult
+
+local OfflineDataRemote = require(script.Parent.Internal.Shared.OfflineDataRemote)
+OfflineDataRemote.SetupServer(function(_player: Player, userId: number): PlayerData?
+	return PlayerState.GetOfflineData(userId)
+end)
 
 return PlayerState

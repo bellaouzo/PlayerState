@@ -25,6 +25,7 @@ local CreateCacheModule = require(script.Parent.Internal.Client.Cache)
 local Validation = require(script.Parent.Internal.Client.Validation)
 local Leaderboard = require(script.Parent.Internal.Client.Leaderboard)
 local CreateConnectionModule = require(script.Parent.Internal.Client.Connection)
+local OfflineDataRemote = require(script.Parent.Internal.Shared.OfflineDataRemote)
 
 export type PlayerData = typeof(DefaultData)
 export type ReplicaInstance = ReplicaClient.Replica
@@ -53,6 +54,7 @@ export type PlayerStateClient = {
 	OnChanged: (pathOrKey: string, callback: (newValue: any, oldValue: any, info: ChangeInfo | {string}?) -> ()) -> ReplicaClient.Connection?,
 	GetReplica: () -> ReplicaInstance?,
 	GetAll: () -> PlayerData?,
+	GetOfflineData: (userId: number) -> PlayerData?,
 	IsReady: () -> boolean,
 	ClearCache: () -> (),
 	GetLeaderboardInfo: (statName: string) -> LeaderboardInfo?,
@@ -370,6 +372,24 @@ function PlayerState.GetAll(): PlayerData?
 	return (localReplica :: ReplicaInstance).Data
 end
 
+function PlayerState.GetOfflineData(userId: number): PlayerData?
+	if not userId or userId == 0 then
+		warn("[PlayerState] Invalid userId for GetOfflineData")
+		return nil
+	end
+
+	local ok, result = pcall(function()
+		return OfflineDataRemote.Invoke(userId)
+	end)
+
+	if not ok then
+		warn(`[PlayerState] GetOfflineData Invoke failed: {result}`)
+		return nil
+	end
+
+	return result :: PlayerData?
+end
+
 function PlayerState.IsReady(): boolean
 	return dataReady and Validation.ValidateReplica(localReplica)
 end
@@ -381,10 +401,12 @@ end
 
 function PlayerState.GetLeaderboardInfo(statName: string): LeaderboardInfo?
 	if not WaitForData() then
+		print("[PlayerState] GetLeaderboardInfo failed: No data")
 		return nil
 	end
 
 	if not Validation.ValidateReplica(localReplica) then
+		print("[PlayerState] GetLeaderboardInfo failed: No replica")
 		return nil
 	end
 
