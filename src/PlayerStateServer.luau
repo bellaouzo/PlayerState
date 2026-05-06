@@ -240,6 +240,34 @@ LeaderboardModule.InitializeLeaderboards()
 
 local PlayerState: PlayerStateServer = {} :: PlayerStateServer
 
+local REMOTES_MODULES_FOLDER = script.Parent.Internal.Shared.Remotes
+local REMOTE_REGISTRY_MODULE_NAME = "Registry"
+
+local function _CollectRemoteModules(): {ModuleScript}
+	local remoteModuleScripts: {ModuleScript} = {}
+
+	for _, child in REMOTES_MODULES_FOLDER:GetChildren() do
+		if child:IsA("ModuleScript") and child.Name ~= REMOTE_REGISTRY_MODULE_NAME then
+			table.insert(remoteModuleScripts, child)
+		end
+	end
+
+	table.sort(remoteModuleScripts, function(a: ModuleScript, b: ModuleScript): boolean
+		return a.Name < b.Name
+	end)
+
+	return remoteModuleScripts
+end
+
+local function _SetupRemoteModules(playerState: PlayerStateServer): ()
+	for _, moduleScript in _CollectRemoteModules() do
+		local remoteModule = require(moduleScript) :: any
+		if typeof(remoteModule) == "table" and typeof(remoteModule.SetupServer) == "function" then
+			remoteModule.SetupServer(playerState)
+		end
+	end
+end
+
 local function _SetupRuntimeSaveProtection(profile: ProfileStoreProfile): ()
 	DataUtils.AttachRuntimeSaveProtection(profile, RUNTIME_NON_PERSISTENT_ROOTS)
 end
@@ -1215,9 +1243,6 @@ PlayerState.ProfileLoaded = ProfileLoaded
 PlayerState.ProfileUnloaded = ProfileUnloaded
 PlayerState.MigrationResult = MigrationResult
 
-local OfflineDataRemote = require(script.Parent.Internal.Shared.OfflineDataRemote)
-OfflineDataRemote.SetupServer(function(_player: Player, userId: number): PlayerData?
-	return PlayerState.GetOfflineData(userId)
-end)
+_SetupRemoteModules(PlayerState)
 
 return PlayerState

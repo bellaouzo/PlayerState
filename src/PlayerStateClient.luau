@@ -25,7 +25,7 @@ local CreateCacheModule = require(script.Parent.Internal.Client.Cache)
 local Validation = require(script.Parent.Internal.Client.Validation)
 local Leaderboard = require(script.Parent.Internal.Client.Leaderboard)
 local CreateConnectionModule = require(script.Parent.Internal.Client.Connection)
-local OfflineDataRemote = require(script.Parent.Internal.Shared.OfflineDataRemote)
+local OfflineDataRemote = require(script.Parent.Internal.Shared.Remotes.GetOfflineDataRemote)
 
 export type PlayerData = typeof(DefaultData)
 export type ReplicaInstance = ReplicaClient.Replica
