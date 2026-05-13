@@ -10,6 +10,9 @@ local DEFAULT_RUNTIME_NON_PERSISTENT_ROOTS = {
 	"_Leaderboards",
 	"_Leaderboard",
 }
+local DEFAULT_SERVER_ONLY_ROOTS = {
+	"Server",
+}
 
 function DataUtils.GetAppropriateValueType(value: number): string
 	if value % 1 ~= 0 then
@@ -98,6 +101,10 @@ local function SetNestedPathValue(data: any, pathKeys: {string}, value: any): bo
 	return true
 end
 
+function DataUtils.SetNestedValue(data: any, pathKeys: {string}, value: any): boolean
+	return SetNestedPathValue(data, pathKeys, value)
+end
+
 local function DeepClone(value: any): any
 	if typeof(value) ~= "table" then
 		return value
@@ -156,6 +163,40 @@ function DataUtils.ResolveRuntimeNonPersistentRoots(runtimeRoots: {string}?): {s
 	end
 
 	return resolved
+end
+
+function DataUtils.ResolveServerOnlyRoots(serverOnlyRoots: {string}?): {string}
+	local resolved: {string} = {}
+	local seen: {[string]: boolean} = {}
+
+	if typeof(serverOnlyRoots) == "table" then
+		for _, root in serverOnlyRoots do
+			if typeof(root) == "string" and root ~= "" and not seen[root] then
+				table.insert(resolved, root)
+				seen[root] = true
+			end
+		end
+	end
+
+	for _, root in DEFAULT_SERVER_ONLY_ROOTS do
+		if not seen[root] then
+			table.insert(resolved, root)
+			seen[root] = true
+		end
+	end
+
+	return resolved
+end
+
+function DataUtils.IsPathInServerOnlyRoots(path: string, serverOnlyRoots: {string}?): boolean
+	return DataUtils.IsPathInRuntimeRoots(path, serverOnlyRoots)
+end
+
+function DataUtils.CloneWithoutRoots(data: any, roots: {string}?): any
+	local clone = DeepClone(data)
+	DataUtils.RemoveRuntimeRoots(clone, roots)
+
+	return clone
 end
 
 function DataUtils.RemoveRuntimeRoots(data: any, runtimeRoots: {string}?): boolean

@@ -9,6 +9,7 @@
 local RunService = game:GetService("RunService")
 
 local dataReadyEvent = Instance.new("BindableEvent")
+local sharedReadyEvent = Instance.new("BindableEvent")
 
 local IS_CLIENT = RunService:IsClient()
 if not IS_CLIENT then
@@ -56,16 +57,25 @@ export type PlayerStateClient = {
 	GetAll: () -> PlayerData?,
 	GetOfflineData: (userId: number) -> PlayerData?,
 	IsReady: () -> boolean,
+	GetShared: (key: string) -> any,
+	GetSharedPath: (path: ValuePath) -> any,
+	OnSharedChanged: (pathOrKey: string, callback: (newValue: any, oldValue: any, info: ChangeInfo | {string}?) -> ()) -> ReplicaClient.Connection?,
+	GetSharedReplica: () -> ReplicaInstance?,
+	GetSharedAll: () -> {[string]: any}?,
+	IsSharedReady: () -> boolean,
 	ClearCache: () -> (),
 	GetLeaderboardInfo: (statName: string) -> LeaderboardInfo?,
 	GetLeaderboard: (statName: string, limit: number?) -> {LeaderboardEntry},
 }
 
 local localReplica: ReplicaInstance?
+local sharedReplica: ReplicaInstance?
 local dataReady: boolean = false
+local sharedReady: boolean = false
 
 local PathCacheModule = CreatePathCache(Config.Client.MaxPathCacheSize)
 local CacheModule = CreateCacheModule(Config.Client.CacheDuration, Config.Client.CacheCleanupInterval)
+local SharedCacheModule = CreateCacheModule(Config.Client.CacheDuration, Config.Client.CacheCleanupInterval)
 local ConnectionModule = CreateConnectionModule()
 local AUTO_CLONE_TABLES = Config.Client.AutoCloneTables
 
@@ -78,6 +88,17 @@ ReplicaClient.OnNew("PlayerData", function(replica)
 	dataReadyEvent:Fire()
 
 	print("[PlayerState] Client data is ready")
+end)
+
+ReplicaClient.OnNew("SharedSession", function(replica)
+	sharedReplica = replica
+	sharedReady = true
+
+	SharedCacheModule.ClearAllCaches()
+
+	sharedReadyEvent:Fire()
+
+	print("[PlayerState] Shared session is ready")
 end)
 ReplicaClient.RequestData()
 
@@ -103,6 +124,28 @@ local function GetNestedValue(data: any, path: string): any
 	return current
 end
 
+local function GetSharedNestedValue(data: any, path: string): any
+	local cached = SharedCacheModule.GetFromNestedCache(path)
+	if cached ~= nil then
+		return cached
+	end
+
+	local keys = PathCacheModule.GetPathKeys(path)
+	local current = data
+
+	for _, key in keys do
+		if typeof(current) ~= "table" or current[key] == nil then
+			SharedCacheModule.SetInNestedCache(path, nil)
+			return nil
+		end
+		current = current[key]
+	end
+
+	SharedCacheModule.SetInNestedCache(path, current)
+
+	return current
+end
+
 local function WaitForData(): boolean
 	return Validation.WaitForData(
 		function()
@@ -114,6 +157,28 @@ local function WaitForData(): boolean
 		end,
 		dataReadyEvent
 	)
+end
+
+local function WaitForSharedData(): boolean
+	return Validation.WaitForData(
+		function()
+			return sharedReady
+		end,
+		Validation.ValidateReplica,
+		function()
+			return sharedReplica
+		end,
+		sharedReadyEvent
+	)
+end
+
+local function ValidateSharedPathOrKey(pathOrKey: string, apiName: string): boolean
+	if type(pathOrKey) ~= "string" then
+		warn(`[PlayerState] {apiName} pathOrKey must be a string`)
+		return false
+	end
+
+	return true
 end
 
 local PlayerState: PlayerStateClient = {} :: PlayerStateClient
@@ -249,6 +314,75 @@ function PlayerState.GetFromDict(dictPath: ValuePath, key: string | number): any
 	return result
 end
 
+function PlayerState.GetShared(key: string): any
+	if not WaitForSharedData() then
+		return nil
+	end
+
+	if not Validation.ValidateReplica(sharedReplica) then
+		return nil
+	end
+
+	if not ValidateSharedPathOrKey(key, "GetShared") then
+		return nil
+	end
+
+	if string.find(key, "%.") then
+		warn(`[PlayerState] Detected path syntax in GetShared() call. Use GetSharedPath() instead for nested paths like "{key}"`)
+		return nil
+	end
+
+	local cachedValue = SharedCacheModule.GetFromValueCache(key)
+	if cachedValue ~= nil then
+		if AUTO_CLONE_TABLES and typeof(cachedValue) == "table" then
+			return Utils.DeepClone(cachedValue)
+		end
+		return cachedValue
+	end
+
+	local value = (sharedReplica :: ReplicaInstance).Data[key]
+
+	if AUTO_CLONE_TABLES and typeof(value) == "table" then
+		value = Utils.DeepClone(value)
+	end
+
+	SharedCacheModule.SetInValueCache(key, value)
+	SharedCacheModule.CleanupCache()
+
+	return value
+end
+
+function PlayerState.GetSharedPath(path: ValuePath): any
+	if not WaitForSharedData() then
+		return nil
+	end
+
+	if not Validation.ValidateReplica(sharedReplica) then
+		return nil
+	end
+
+	if not ValidateSharedPathOrKey(path, "GetSharedPath") then
+		return nil
+	end
+
+	local replicaData = (sharedReplica :: ReplicaInstance).Data
+
+	local result
+	if not string.find(path, ".", 1, true) then
+		result = replicaData[path]
+	else
+		result = GetSharedNestedValue(replicaData, path)
+	end
+
+	SharedCacheModule.CleanupCache()
+
+	if AUTO_CLONE_TABLES and typeof(result) == "table" then
+		return Utils.DeepClone(result)
+	end
+
+	return result
+end
+
 function PlayerState.OnChanged(pathOrKey: string, callback: (newValue: any, oldValue: any, fullPath: {string}?) -> ()): ReplicaClient.Connection?
 	local function createConnection(replica: ReplicaInstance): ReplicaClient.Connection?
 		if not Validation.ValidateReplica(replica) then
@@ -360,6 +494,118 @@ function PlayerState.GetReplica(): ReplicaInstance?
 	return localReplica
 end
 
+function PlayerState.OnSharedChanged(pathOrKey: string, callback: (newValue: any, oldValue: any, fullPath: {string}?) -> ()): ReplicaClient.Connection?
+	if not ValidateSharedPathOrKey(pathOrKey, "OnSharedChanged") then
+		return nil
+	end
+
+	if type(callback) ~= "function" then
+		warn("[PlayerState] OnSharedChanged callback must be a function")
+		return nil
+	end
+
+	local function createConnection(replica: ReplicaInstance): ReplicaClient.Connection?
+		if not Validation.ValidateReplica(replica) then
+			return nil
+		end
+
+		local connection: ReplicaClient.Connection?
+
+		if pathOrKey == "." then
+			connection = replica:OnChange(function(action, path, param1, param2)
+				SharedCacheModule.ClearAllCaches()
+
+				if action == "Set" then
+					local newValue, oldValue = param1, param2
+					callback(newValue, oldValue, {action = action, path = path})
+				elseif action == "SetValues" then
+					local values = param1
+					callback(values, nil, {action = action, path = path})
+				elseif action == "TableInsert" then
+					local value, index = param1, param2
+					callback(value, nil, {action = action, path = path, index = index})
+				elseif action == "TableRemove" then
+					local removedValue, index = param1, param2
+					callback(nil, removedValue, {action = action, path = path, index = index})
+				end
+			end)
+		else
+			local pathKeys = PathCacheModule.GetPathKeys(pathOrKey)
+
+			connection = replica:OnChange(function(action, path, param1, param2)
+				local isExactMatch = #path == #pathKeys
+				local isSubPath = #path > #pathKeys
+				local pathMatches = false
+
+				if isExactMatch or isSubPath then
+					pathMatches = true
+
+					for i = 1, #pathKeys do
+						if path[i] ~= pathKeys[i] then
+							pathMatches = false
+							break
+						end
+					end
+				end
+
+				if pathMatches then
+					SharedCacheModule.InvalidateForMutationPath(path)
+
+					if action == "Set" then
+						if isExactMatch then
+							local newValue, oldValue = param1, param2
+
+							callback(newValue, oldValue, pathKeys)
+						else
+							local currentValue = PlayerState.GetSharedPath(pathOrKey)
+
+							callback(currentValue, nil, {action = action, path = path})
+						end
+					elseif action == "SetValues" then
+						if isExactMatch then
+							local values = param1
+
+							callback(values, nil, {action = action, path = path})
+						else
+							local currentValue = PlayerState.GetSharedPath(pathOrKey)
+
+							callback(currentValue, nil, {action = action, path = path})
+						end
+					elseif action == "TableInsert" then
+						local value, index = param1, param2
+
+						callback(value, nil, {action = action, path = path, index = index})
+					elseif action == "TableRemove" then
+						local removedValue, index = param1, param2
+
+						callback(nil, removedValue, {action = action, path = path, index = index})
+					end
+				end
+			end)
+		end
+
+		if connection then
+			ConnectionModule.AddConnection(connection)
+		end
+
+		return connection
+	end
+
+	if sharedReplica then
+		return createConnection(sharedReplica)
+	else
+		local connection: ReplicaClient.Connection?
+
+		local newReplicaConnection = ReplicaClient.OnNew("SharedSession", function(replica)
+			connection = createConnection(replica)
+		end)
+
+		ConnectionModule.AddConnection(newReplicaConnection)
+
+		return connection
+	end
+end
+
 function PlayerState.GetAll(): PlayerData?
 	if not WaitForData() then
 		return nil
@@ -370,6 +616,26 @@ function PlayerState.GetAll(): PlayerData?
 	end
 
 	return (localReplica :: ReplicaInstance).Data
+end
+
+function PlayerState.GetSharedReplica(): ReplicaInstance?
+	if not Validation.ValidateReplica(sharedReplica) then
+		return nil
+	end
+
+	return sharedReplica
+end
+
+function PlayerState.GetSharedAll(): {[string]: any}?
+	if not WaitForSharedData() then
+		return nil
+	end
+
+	if not Validation.ValidateReplica(sharedReplica) then
+		return nil
+	end
+
+	return (sharedReplica :: ReplicaInstance).Data
 end
 
 function PlayerState.GetOfflineData(userId: number): PlayerData?
@@ -394,9 +660,14 @@ function PlayerState.IsReady(): boolean
 	return dataReady and Validation.ValidateReplica(localReplica)
 end
 
+function PlayerState.IsSharedReady(): boolean
+	return sharedReady and Validation.ValidateReplica(sharedReplica)
+end
+
 function PlayerState.ClearCache(): ()
 	PathCacheModule.ClearCache()
 	CacheModule.ClearAllCaches()
+	SharedCacheModule.ClearAllCaches()
 end
 
 function PlayerState.GetLeaderboardInfo(statName: string): LeaderboardInfo?

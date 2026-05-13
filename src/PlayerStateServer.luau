@@ -34,6 +34,7 @@ local DataWipe = require(script.Parent.Internal.Server.DataWipe)
 local LegacyMigration = require(script.Parent.Internal.Server.LegacyMigration)
 
 export type PlayerData = typeof(DefaultData)
+export type SharedSessionData = {[string]: any}
 
 export type ProfileStoreProfile = {
 	Data: PlayerData,
@@ -111,6 +112,15 @@ export type PlayerStateServer = {
 	SetOfflineData: (userId: number, path: string, value: any) -> boolean,
 	WipePlayerData: (player: Player) -> boolean,
 	WipeOfflinePlayerData: (userId: number) -> boolean,
+	SetShared: (key: string, value: any) -> boolean,
+	GetShared: (key: string) -> any,
+	SetSharedPath: (path: ValuePath, value: any) -> boolean,
+	GetSharedPath: (path: ValuePath) -> any,
+	SetSharedValues: (values: {[string]: any}) -> boolean,
+	OnSharedChanged: (pathOrKey: string, callback: ChangeCallback) -> Connection?,
+	GetSharedReplica: () -> ReplicaInstance?,
+	GetSharedAll: () -> SharedSessionData?,
+	IsSharedReady: () -> boolean,
 
 	BeforeSave: BeforeSaveSignal,
 	ProfileLoaded: ProfileLoadedSignal,
@@ -150,6 +160,12 @@ export type MigrationResultSignal = {
 local CONFIG = Config.Server
 local AUTO_CLONE_TABLES = CONFIG.AutoCloneTables
 local RUNTIME_NON_PERSISTENT_ROOTS = DataUtils.ResolveRuntimeNonPersistentRoots(CONFIG.RuntimeNonPersistentRoots)
+local SERVER_ONLY_ROOTS = DataUtils.ResolveServerOnlyRoots(CONFIG.ServerOnlyRoots)
+local SERVER_ONLY_ROOT_LOOKUP: {[string]: boolean} = {}
+
+for _, root in SERVER_ONLY_ROOTS do
+	SERVER_ONLY_ROOT_LOOKUP[root] = true
+end
 
 if CONFIG.Leaderboard and CONFIG.Leaderboard.SyncInterval and CONFIG.Leaderboard.SyncInterval < 60 then
 	warn("[PlayerState] SyncInterval should be >= 60 seconds for optimal performance. Setting to 60.")
@@ -189,6 +205,34 @@ local function GetNestedValue(data: any, path: string): any
 	return DataUtils.GetNestedValue(data, keys)
 end
 
+local function SetNestedValue(data: any, path: string, value: any): boolean
+	local keys = GetPathKeys(path)
+	return DataUtils.SetNestedValue(data, keys, value)
+end
+
+local function IsServerOnlyPath(path: string): boolean
+	if typeof(path) ~= "string" or path == "" then
+		return false
+	end
+
+	local dotIndex = string.find(path, ".", 1, true)
+	local root = if dotIndex then string.sub(path, 1, dotIndex - 1) else path
+
+	return SERVER_ONLY_ROOT_LOOKUP[root] == true
+end
+
+local function IsServerOnlyRoot(root: string): boolean
+	return SERVER_ONLY_ROOT_LOOKUP[root] == true
+end
+
+local function CloneForReplica(value: any): any
+	if typeof(value) == "table" then
+		return Utils.DeepClone(value)
+	end
+
+	return value
+end
+
 local LeaderboardModule = CreateLeaderboardModule(
 	CONFIG,
 	Validation.ValidatePlayer,
@@ -225,6 +269,16 @@ local BatchModule = CreateBatchModule(
 )
 
 local PlayerDataToken = ReplicaServer.Token("PlayerData")
+local SharedSessionToken = ReplicaServer.Token("SharedSession")
+
+local sharedSessionTemplate = if typeof(CONFIG.SharedSession) == "table" then CONFIG.SharedSession else {}
+
+local sharedReplica = ReplicaServer.New({
+	Token = SharedSessionToken,
+	Data = Utils.DeepClone(sharedSessionTemplate),
+	Tags = { Name = "SharedSession" },
+})
+sharedReplica:Replicate()
 
 profileStore = ProfileService.New(
 	CONFIG.DataStore.Name,
@@ -394,6 +448,53 @@ local function _GetWritableReplica(player: Player): ReplicaInstance?
 	return _GetPlayerReplica(player)
 end
 
+local function _GetWritableProfile(player: Player): ProfileStoreProfile?
+	if not _CanMutatePlayerData(player) then
+		return nil
+	end
+
+	return _GetPlayerProfile(player)
+end
+
+local function _GetWritableState(player: Player): (ProfileStoreProfile?, ReplicaInstance?)
+	if not Validation.ValidatePlayer(player) then
+		return nil, nil
+	end
+
+	if not _CanMutatePlayerData(player) then
+		return nil, nil
+	end
+
+	local profile = profiles[player]
+	local replica = replicas[player]
+	if Validation.ValidateProfile(profile) and Validation.ValidateReplica(replica) then
+		return profile, replica
+	end
+
+	if not _WaitForPlayerData(player) then
+		return nil, nil
+	end
+
+	profile = profiles[player]
+	replica = replicas[player]
+
+	if Validation.ValidateProfile(profile) and Validation.ValidateReplica(replica) then
+		return profile, replica
+	end
+
+	warn(`[PlayerState] No valid profile or replica found for {player.Name}`)
+	return nil, nil
+end
+
+local function _ValidateSharedPathOrKey(pathOrKey: string, apiName: string): boolean
+	if type(pathOrKey) ~= "string" then
+		warn(`[PlayerState] {apiName} pathOrKey must be a string`)
+		return false
+	end
+
+	return true
+end
+
 function PlayerState.Init(player: Player, existingData: PlayerData?): boolean
 	if not Validation.ValidatePlayer(player) then return false end
 
@@ -443,7 +544,7 @@ function PlayerState.Init(player: Player, existingData: PlayerData?): boolean
 		end
 		local replica = ReplicaServer.New({
 			Token = PlayerDataToken,
-			Data = profile.Data,
+			Data = DataUtils.CloneWithoutRoots(profile.Data, SERVER_ONLY_ROOTS),
 			Tags = { UserId = player.UserId, PlayerName = player.Name },
 		})
 		replicas[player] = replica
@@ -579,9 +680,8 @@ end
 
 
 function PlayerState.Set(player: Player, key: string, value: any): boolean
-	local replica = _GetWritableReplica(player)
-
-	if not replica then
+	local profile, replica = _GetWritableState(player)
+	if not profile or not replica then
 		return false
 	end
 
@@ -595,14 +695,18 @@ function PlayerState.Set(player: Player, key: string, value: any): boolean
 		return false
 	end
 
-	local success = pcall(replica.Set, replica, {key}, value)
-	if not success then
-		warn(`[PlayerState] Set operation failed for {player.Name}`)
-		return false
-	end
+	profile.Data[key] = value
 
-	if LeaderboardModule.IsStatTracked(key) and typeof(value) == "number" then
-		LeaderboardModule.UpdateReplicaLeaderboardScore(replica, key, value :: number)
+	if not IsServerOnlyRoot(key) then
+		local success = pcall(replica.Set, replica, {key}, CloneForReplica(value))
+		if not success then
+			warn(`[PlayerState] Set operation failed for {player.Name}`)
+			return false
+		end
+
+		if LeaderboardModule.IsStatTracked(key) and typeof(value) == "number" then
+			LeaderboardModule.UpdateReplicaLeaderboardScore(replica, key, value :: number)
+		end
 	end
 
 	return true
@@ -613,12 +717,12 @@ function PlayerState.Get(player: Player, key: string): any
 		return nil
 	end
 
-	local replica = _GetPlayerReplica(player)
-	if not replica then
+	local profile = _GetPlayerProfile(player)
+	if not profile then
 		return nil
 	end
 
-	local value = (replica.Data :: any)[key]
+	local value = (profile.Data :: any)[key]
 
 	if AUTO_CLONE_TABLES and typeof(value) == "table" then
 		return Utils.DeepClone(value)
@@ -640,9 +744,8 @@ function PlayerState.Clone(value: any, deep: boolean?): any
 end
 
 function PlayerState.SetPath(player: Player, path: ValuePath, value: any): boolean
-	local replica = _GetWritableReplica(player)
-
-	if not replica then
+	local profile, replica = _GetWritableState(player)
+	if not profile or not replica then
 		return false
 	end
 
@@ -652,13 +755,21 @@ function PlayerState.SetPath(player: Player, path: ValuePath, value: any): boole
 	end
 
 	local shouldSyncLeaderboard = LeaderboardModule.IsStatTracked(path) and typeof(value) == "number"
+	local isServerOnly = IsServerOnlyPath(path)
+
+	if isServerOnly then
+		SetNestedValue(profile.Data, path, value)
+		return true
+	end
 
 	if not string.find(path, ".", 1, true) then
-		local success = pcall(replica.Set, replica, {path}, value)
+		local success = pcall(replica.Set, replica, {path}, CloneForReplica(value))
 		if not success then
 			warn(`[PlayerState] SetPath operation failed for {player.Name}`)
 			return false
 		end
+
+		profile.Data[path] = value
 
 		if shouldSyncLeaderboard then
 			LeaderboardModule.UpdateReplicaLeaderboardScore(replica, path, value :: number)
@@ -668,11 +779,13 @@ function PlayerState.SetPath(player: Player, path: ValuePath, value: any): boole
 	end
 
 	local pathKeys = GetPathKeys(path)
-	local success = pcall(replica.Set, replica, pathKeys, value)
+	local success = pcall(replica.Set, replica, pathKeys, CloneForReplica(value))
 	if not success then
 		warn(`[PlayerState] SetPath operation failed for {player.Name}`)
 		return false
 	end
+
+	DataUtils.SetNestedValue(profile.Data, pathKeys, value)
 
 	if shouldSyncLeaderboard then
 		LeaderboardModule.UpdateReplicaLeaderboardScore(replica, path, value :: number)
@@ -682,16 +795,16 @@ function PlayerState.SetPath(player: Player, path: ValuePath, value: any): boole
 end
 
 function PlayerState.GetPath(player: Player, path: ValuePath): any
-	local replica = _GetPlayerReplica(player)
-	if not replica then
+	local profile = _GetPlayerProfile(player)
+	if not profile then
 		return nil
 	end
 
 	local result
 	if not string.find(path, ".", 1, true) then
-		result = (replica.Data :: any)[path]
+		result = (profile.Data :: any)[path]
 	else
-		result = GetNestedValue(replica.Data, path)
+		result = GetNestedValue(profile.Data, path)
 	end
 
 	if AUTO_CLONE_TABLES and typeof(result) == "table" then
@@ -769,12 +882,158 @@ function PlayerState.OnChanged(player: Player, pathOrKey: string, callback: Chan
 	end)
 end
 
-function PlayerState.SetValues(player: Player, values: {[string]: any}): boolean
-	local replica = _GetWritableReplica(player)
-
-	if not replica then
+function PlayerState.SetShared(key: string, value: any): boolean
+	if not _ValidateSharedPathOrKey(key, "SetShared") then
 		return false
 	end
+
+	if string.find(key, "%.") then
+		warn(`[PlayerState] Detected path syntax in SetShared() call. Use SetSharedPath() instead for nested paths like "{key}"`)
+		return false
+	end
+
+	local success = pcall(sharedReplica.Set, sharedReplica, {key}, value)
+	if not success then
+		warn("[PlayerState] SetShared operation failed")
+		return false
+	end
+
+	return true
+end
+
+function PlayerState.GetShared(key: string): any
+	if not _ValidateSharedPathOrKey(key, "GetShared") then
+		return nil
+	end
+
+	if string.find(key, "%.") then
+		warn(`[PlayerState] Detected path syntax in GetShared() call. Use GetSharedPath() instead for nested paths like "{key}"`)
+		return nil
+	end
+
+	local value = (sharedReplica.Data :: any)[key]
+
+	if AUTO_CLONE_TABLES and typeof(value) == "table" then
+		return Utils.DeepClone(value)
+	end
+
+	return value
+end
+
+function PlayerState.SetSharedPath(path: ValuePath, value: any): boolean
+	if not _ValidateSharedPathOrKey(path, "SetSharedPath") then
+		return false
+	end
+
+	local pathKeys = if string.find(path, ".", 1, true) then GetPathKeys(path) else {path}
+	local success = pcall(sharedReplica.Set, sharedReplica, pathKeys, value)
+	if not success then
+		warn("[PlayerState] SetSharedPath operation failed")
+		return false
+	end
+
+	return true
+end
+
+function PlayerState.GetSharedPath(path: ValuePath): any
+	if not _ValidateSharedPathOrKey(path, "GetSharedPath") then
+		return nil
+	end
+
+	local result
+	if not string.find(path, ".", 1, true) then
+		result = (sharedReplica.Data :: any)[path]
+	else
+		result = GetNestedValue(sharedReplica.Data, path)
+	end
+
+	if AUTO_CLONE_TABLES and typeof(result) == "table" then
+		return Utils.DeepClone(result)
+	end
+
+	return result
+end
+
+function PlayerState.SetSharedValues(values: {[string]: any}): boolean
+	if typeof(values) ~= "table" then
+		warn("[PlayerState] SetSharedValues values must be a table")
+		return false
+	end
+
+	local success = pcall(sharedReplica.SetValues, sharedReplica, {}, values)
+	if not success then
+		warn("[PlayerState] SetSharedValues operation failed")
+		return false
+	end
+
+	return true
+end
+
+function PlayerState.OnSharedChanged(pathOrKey: string, callback: ChangeCallback): Connection?
+	if not _ValidateSharedPathOrKey(pathOrKey, "OnSharedChanged") then
+		return nil
+	end
+
+	if type(callback) ~= "function" then
+		warn("[PlayerState] OnSharedChanged callback must be a function")
+		return nil
+	end
+
+	if pathOrKey == "." then
+		return sharedReplica:OnChange(function(action, path, param1, param2)
+			if action == "Set" then
+				local newValue, oldValue = param1, param2
+				callback(newValue, oldValue, {action = action, path = path})
+			elseif action == "SetValues" then
+				local values = param1
+				callback(values, nil, {action = action, path = path})
+			elseif action == "TableInsert" then
+				local value, index = param1, param2
+				callback(value, nil, {action = action, path = path, index = index})
+			elseif action == "TableRemove" then
+				local removedValue, index = param1, param2
+				callback(nil, removedValue, {action = action, path = path, index = index})
+			end
+		end)
+	end
+
+	local pathKeys = GetPathKeys(pathOrKey)
+	return sharedReplica:OnPath(pathKeys, true, function(action, path, param1, param2)
+		local isExactMatch = #path == #pathKeys
+
+		if action == "Set" then
+			if isExactMatch then
+				local newValue, oldValue = param1, param2
+				callback(newValue, oldValue, pathKeys)
+			else
+				callback(PlayerState.GetSharedPath(pathOrKey), nil, {action = action, path = path})
+			end
+		elseif action == "SetValues" then
+			if isExactMatch then
+				local values = param1
+				callback(values, nil, {action = action, path = path})
+			else
+				callback(PlayerState.GetSharedPath(pathOrKey), nil, {action = action, path = path})
+			end
+		elseif action == "TableInsert" then
+			local value, index = param1, param2
+
+			callback(value, nil, {action = action, path = path, index = index})
+		elseif action == "TableRemove" then
+			local removedValue, index = param1, param2
+
+			callback(nil, removedValue, {action = action, path = path, index = index})
+		end
+	end)
+end
+
+function PlayerState.SetValues(player: Player, values: {[string]: any}): boolean
+	local profile, replica = _GetWritableState(player)
+	if not profile or not replica then
+		return false
+	end
+
+	local replicatedValues: {[string]: any} = {}
 
 	for key, _ in values do
 		if key == "leaderstats" or string.sub(key, 1, 12) == "leaderstats." then
@@ -783,13 +1042,25 @@ function PlayerState.SetValues(player: Player, values: {[string]: any}): boolean
 		end
 	end
 
-	local success = pcall(replica.SetValues, replica, {}, values)
+	for key, value in values do
+		profile.Data[key] = value
+
+		if not IsServerOnlyRoot(key) then
+			replicatedValues[key] = CloneForReplica(value)
+		end
+	end
+
+	if not next(replicatedValues) then
+		return true
+	end
+
+	local success = pcall(replica.SetValues, replica, {}, replicatedValues)
 	if not success then
 		warn(`[PlayerState] SetValues operation failed for {player.Name}`)
 		return false
 	end
 
-	for key, value in values do
+	for key, value in replicatedValues do
 		if LeaderboardModule.IsStatTracked(key) and typeof(value) == "number" then
 			LeaderboardModule.UpdateReplicaLeaderboardScore(replica, key, value :: number)
 		end
@@ -803,7 +1074,8 @@ function PlayerState.BatchSetValues(player: Player, operations: {BatchOperation}
 		return false
 	end
 
-	if not _GetWritableReplica(player) then
+	local profile, replica = _GetWritableState(player)
+	if not profile or not replica then
 		return false
 	end
 
@@ -813,7 +1085,14 @@ function PlayerState.BatchSetValues(player: Player, operations: {BatchOperation}
 			return false
 		end
 
-		BatchModule.ScheduleBatchOperation(player, operation)
+		SetNestedValue(profile.Data, operation.path, operation.value)
+
+		if not IsServerOnlyPath(operation.path) then
+			BatchModule.ScheduleBatchOperation(player, {
+				path = operation.path,
+				value = CloneForReplica(operation.value),
+			})
+		end
 	end
 
 	return true
@@ -824,8 +1103,8 @@ function PlayerState.BatchUpdateValues(player: Player, operations: {BatchUpdateO
 		return false
 	end
 
-	local replica = _GetWritableReplica(player)
-	if not replica then
+	local profile = _GetWritableProfile(player)
+	if not profile then
 		return false
 	end
 
@@ -833,7 +1112,7 @@ function PlayerState.BatchUpdateValues(player: Player, operations: {BatchUpdateO
 
 	for _, op in operations do
 		local opKeys = GetPathKeys(op.path)
-		local currentValue = DataUtils.GetNestedValue(replica.Data, opKeys)
+		local currentValue = DataUtils.GetNestedValue(profile.Data, opKeys)
 
 		if typeof(currentValue) ~= "number" then
 			warn(`[PlayerState] Cannot {op.operation} non-numeric value at path: {op.path}`)
@@ -879,73 +1158,119 @@ function PlayerState.FlushBatch(player: Player): boolean
 end
 
 function PlayerState.AddToArray(player: Player, arrayPath: ArrayPath, item: any): boolean
-	local replica = _GetWritableReplica(player)
-
-	if not replica then
+	local profile, replica = _GetWritableState(player)
+	if not profile or not replica then
 		return false
 	end
 
 	local pathKeys = GetPathKeys(arrayPath)
-	local success, result = ArrayOps.AddToArray(replica, pathKeys, item)
+	local array = DataUtils.GetNestedValue(profile.Data, pathKeys)
+	if typeof(array) ~= "table" then
+		warn(`[PlayerState] AddToArray path "{arrayPath}" is not an array for {player.Name}`)
+		return false
+	end
+
+	if IsServerOnlyPath(arrayPath) then
+		table.insert(array, item)
+		return true
+	end
+
+	local success, result = ArrayOps.AddToArray(replica, pathKeys, CloneForReplica(item))
 	if not success then
 		warn(`[PlayerState] AddToArray operation failed for {player.Name}: {result}`)
 		return false
 	end
 
+	table.insert(array, item)
+
 	return success
 end
 
 function PlayerState.RemoveFromArray(player: Player, arrayPath: ArrayPath, index: number): boolean
-	local replica = _GetWritableReplica(player)
-
-	if not replica then
+	local profile, replica = _GetWritableState(player)
+	if not profile or not replica then
 		return false
 	end
 
 	local pathKeys = GetPathKeys(arrayPath)
+	local array = DataUtils.GetNestedValue(profile.Data, pathKeys)
+	if typeof(array) ~= "table" then
+		warn(`[PlayerState] RemoveFromArray path "{arrayPath}" is not an array for {player.Name}`)
+		return false
+	end
+
+	if IsServerOnlyPath(arrayPath) then
+		table.remove(array, index)
+		return true
+	end
+
 	local success, result = ArrayOps.RemoveFromArray(replica, pathKeys, index)
 	if not success then
 		warn(`[PlayerState] RemoveFromArray operation failed for {player.Name}: {result}`)
 		return false
 	end
 
+	table.remove(array, index)
+
 	return success
 end
 
 function PlayerState.UpdateArrayItem(player: Player, arrayPath: ArrayPath, index: number, newItem: any): boolean
-	local replica = _GetWritableReplica(player)
-
-	if not replica then
+	local profile, replica = _GetWritableState(player)
+	if not profile or not replica then
 		return false
 	end
 
 	local pathKeys = GetPathKeys(arrayPath)
-	local success = ArrayOps.UpdateArrayItem(replica, pathKeys, index, newItem)
+	local array = DataUtils.GetNestedValue(profile.Data, pathKeys)
+	if typeof(array) ~= "table" then
+		warn(`[PlayerState] UpdateArrayItem path "{arrayPath}" is not an array for {player.Name}`)
+		return false
+	end
+
+	if IsServerOnlyPath(arrayPath) then
+		array[index] = newItem
+		return true
+	end
+
+	local success = ArrayOps.UpdateArrayItem(replica, pathKeys, index, CloneForReplica(newItem))
 	if not success then
 		warn(`[PlayerState] UpdateArrayItem operation failed for {player.Name}`)
 		return false
 	end
 
+	array[index] = newItem
+
 	return true
 end
 
 function PlayerState.SetInDict(player: Player, dictPath: DictPath, key: string | number, value: any): boolean
-	local replica = _GetWritableReplica(player)
-
-	if not replica then
+	local profile, replica = _GetWritableState(player)
+	if not profile or not replica then
 		return false
 	end
 
 	local stringKey = if typeof(key) == "number" then tostring(key) else key
 	local pathKeys = GetPathKeys(dictPath)
-	local prior = DataUtils.GetNestedValue(replica.Data, pathKeys)
+	local prior = DataUtils.GetNestedValue(profile.Data, pathKeys)
 
 	if prior ~= nil and typeof(prior) ~= "table" then
 		warn(`[PlayerState] SetInDict path "{dictPath}" is not a dictionary for {player.Name}`)
 		return false
 	end
 
-	local success = DictOps.SetInDict(replica, pathKeys, stringKey, value)
+	if IsServerOnlyPath(dictPath) then
+		if prior == nil then
+			DataUtils.SetNestedValue(profile.Data, pathKeys, {[stringKey] = value})
+			warn(`[PlayerState] Created new dictionary at path "{dictPath}" for {player.Name}`)
+		else
+			prior[stringKey] = value
+		end
+
+		return true
+	end
+
+	local success = DictOps.SetInDict(replica, pathKeys, stringKey, CloneForReplica(value))
 
 	if not success then
 		warn(`[PlayerState] SetInDict operation failed for {player.Name}`)
@@ -953,16 +1278,17 @@ function PlayerState.SetInDict(player: Player, dictPath: DictPath, key: string |
 	end
 
 	if prior == nil then
+		DataUtils.SetNestedValue(profile.Data, pathKeys, {[stringKey] = value})
 		warn(`[PlayerState] Created new dictionary at path "{dictPath}" for {player.Name}`)
+	else
+		prior[stringKey] = value
 	end
 
 	return true
 end
 
 function PlayerState.GetFromDict(player: Player, dictPath: DictPath, key: string | number): any
-	local replica = _GetPlayerReplica(player)
-
-	if not replica then
+	if not _GetPlayerProfile(player) then
 		return nil
 	end
 
@@ -980,20 +1306,33 @@ function PlayerState.GetFromDict(player: Player, dictPath: DictPath, key: string
 end
 
 function PlayerState.RemoveFromDict(player: Player, dictPath: DictPath, key: string | number): boolean
-	local replica = _GetWritableReplica(player)
-
-	if not replica then
+	local profile, replica = _GetWritableState(player)
+	if not profile or not replica then
 		return false
 	end
 
 	local stringKey = if typeof(key) == "number" then tostring(key) else key
 	local pathKeys = GetPathKeys(dictPath)
+	local dict = DataUtils.GetNestedValue(profile.Data, pathKeys)
+
+	if typeof(dict) ~= "table" then
+		warn(`[PlayerState] RemoveFromDict failed - path is not a dictionary for {player.Name}`)
+		return false
+	end
+
+	if IsServerOnlyPath(dictPath) then
+		dict[stringKey] = nil
+		return true
+	end
+
 	local success = DictOps.RemoveFromDict(replica, pathKeys, stringKey)
 
 	if not success then
 		warn(`[PlayerState] RemoveFromDict failed - path is not a dictionary for {player.Name}`)
 		return false
 	end
+
+	dict[stringKey] = nil
 
 	return true
 end
@@ -1015,12 +1354,32 @@ function PlayerState.GetAll(player: Player): PlayerData?
 		return nil
 	end
 
-	local replica = _GetPlayerReplica(player)
-	if not replica then
+	local profile = _GetPlayerProfile(player)
+	if not profile then
 		return nil
 	end
 
-	return replica.Data
+	return profile.Data
+end
+
+function PlayerState.GetSharedReplica(): ReplicaInstance?
+	if not Validation.ValidateReplica(sharedReplica) then
+		return nil
+	end
+
+	return sharedReplica
+end
+
+function PlayerState.GetSharedAll(): SharedSessionData?
+	if not Validation.ValidateReplica(sharedReplica) then
+		return nil
+	end
+
+	return sharedReplica.Data
+end
+
+function PlayerState.IsSharedReady(): boolean
+	return Validation.ValidateReplica(sharedReplica)
 end
 
 function PlayerState.IsPlayerDataReady(player: Player): boolean
@@ -1117,13 +1476,13 @@ function PlayerState.Increment(player: Player, path: ValuePath, amount: number?)
 		return false
 	end
 
-	local replica = _GetWritableReplica(player)
-	if not replica then
+	local profile = _GetWritableProfile(player)
+	if not profile then
 		return false
 	end
 
 	local pathKeys = GetPathKeys(path)
-	local currentValue = DataUtils.GetNestedValue(replica.Data, pathKeys)
+	local currentValue = DataUtils.GetNestedValue(profile.Data, pathKeys)
 	if typeof(currentValue) ~= "number" then
 		warn(`[PlayerState] Cannot increment non-numeric value at path: {path}`)
 		return false

@@ -23,6 +23,9 @@ return {
 		isSprinting = false,
 	},
 
+	-- Server-only data. Saves normally, but never replicates to clients.
+	Server = {},
+
 	-- Data that goes onto leaderstats/top right leaderboard display
 	leaderstats = {
 		["💰 Coins"] = "Coins",

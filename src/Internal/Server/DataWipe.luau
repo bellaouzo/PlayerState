@@ -40,7 +40,10 @@ function DataWipe.WipePlayerData(
 
 	local replica = getReplica(player)
 	if validateReplica(replica) then
-		pcall(replica.SetValues, replica, {}, profile.Data)
+		local serverOnlyRoots = DataUtils.ResolveServerOnlyRoots(config.ServerOnlyRoots)
+		local replicatedData = DataUtils.CloneWithoutRoots(profile.Data, serverOnlyRoots)
+
+		pcall(replica.SetValues, replica, {}, replicatedData)
 	end
 
 	print(`[PlayerState] Successfully wiped data for {player.Name}`)

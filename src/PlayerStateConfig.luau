@@ -16,6 +16,21 @@ local Config = {
 			-- Data template/structure (automatically pulled from DefaultData)
 			Template = DefaultData,
 		},
+
+		-- Shared, non-persistent data replicated to every client in this server.
+		-- Example:
+		-- SharedSession = {
+		--     round = {
+		--         phase = "Waiting",
+		--         endsAt = 0,
+		--     },
+		-- },
+		SharedSession = {
+			round = {
+				phase = "Waiting",
+				endsAt = 0,
+			},
+		},
 		
 		DataStore = {
 			-- DataStore name (change for different versions/environments)
@@ -77,6 +92,10 @@ local Config = {
 			"_LeaderboardRanks",
 			"_Leaderboards",
 			"_Leaderboard",
+		},
+
+		ServerOnlyRoots = {
+			"Server",
 		},
 
 		-- Batch processing settings
