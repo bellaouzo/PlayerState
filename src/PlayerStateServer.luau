@@ -347,6 +347,15 @@ local function _GetPlayerProfile(player: Player): ProfileStoreProfile?
 	end
 
 	local profile = profiles[player]
+	if Validation.ValidateProfile(profile) then
+		return profile
+	end
+
+	if not _WaitForPlayerData(player) then
+		return nil
+	end
+
+	profile = profiles[player]
 	if not Validation.ValidateProfile(profile) then
 		warn(`[PlayerState] No valid profile found for {player.Name}`)
 		return nil
