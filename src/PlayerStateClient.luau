@@ -3,7 +3,7 @@
 --[[
 	PlayerStateClient - Client-side player data access
 	
-	Documentation: https://playerstate.netlify.app/api/client.html
+	Documentation: https://playerstate.netlify.app/api/client/
 --]]
 
 local RunService = game:GetService("RunService")

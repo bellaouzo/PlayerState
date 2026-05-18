@@ -1,9 +1,9 @@
 --!strict
 
 --[[
-	PlayerStateClient - Server-side player data access
+	PlayerStateServer - Server-side player data access
 
-	Documentation: https://playerstate.netlify.app/api/server.html
+	Documentation: https://playerstate.netlify.app/api/server/
 --]]
 
 local Players = game:GetService("Players")
@@ -123,6 +123,7 @@ export type PlayerStateServer = {
 	IsSharedReady: () -> boolean,
 
 	BeforeSave: BeforeSaveSignal,
+	BeforeRelease: BeforeReleaseSignal,
 	ProfileLoaded: ProfileLoadedSignal,
 	ProfileUnloaded: ProfileUnloadedSignal,
 	MigrationResult: MigrationResultSignal,
@@ -140,6 +141,11 @@ export type BeforeSaveSignal = {
 	Connect: (self: BeforeSaveSignal, listener: (player: Player, data: PlayerData) -> ()) -> (Connection),
 	Fire: (self: BeforeSaveSignal, player: Player, data: PlayerData) -> (),
 	GetListenerCount: (self: BeforeSaveSignal) -> (number),
+}
+export type BeforeReleaseSignal = {
+	Connect: (self: BeforeReleaseSignal, listener: (player: Player, data: PlayerData) -> ()) -> (Connection),
+	Fire: (self: BeforeReleaseSignal, player: Player, data: PlayerData) -> (),
+	GetListenerCount: (self: BeforeReleaseSignal) -> (number),
 }
 export type ProfileLoadedSignal = {
 	Connect: (self: ProfileLoadedSignal, listener: (player: Player, data: PlayerData) -> ()) -> (Connection),
@@ -193,12 +199,18 @@ local profileStore: ProfileStoreInstance
 local leaderboardPeriodicStarted = false
 
 local BeforeSave = Signal.New() :: BeforeSaveSignal
+local BeforeRelease = Signal.New() :: BeforeReleaseSignal
 local ProfileLoaded = Signal.New() :: ProfileLoadedSignal
 local ProfileUnloaded = Signal.New() :: ProfileUnloadedSignal
 local MigrationResult = Signal.New() :: MigrationResultSignal
 
 local PathCacheModule = CreatePathCache(CONFIG.MaxCacheSize)
 local GetPathKeys = PathCacheModule.GetPathKeys
+
+local function _FireReleaseHooks(player: Player, data: PlayerData)
+	BeforeRelease:Fire(player, data)
+	BeforeSave:Fire(player, data)
+end
 
 local function GetNestedValue(data: any, path: string): any
 	local keys = GetPathKeys(path)
@@ -537,7 +549,7 @@ function PlayerState.Init(player: Player, existingData: PlayerData?): boolean
 		if ok and type(viewedUsername) == "string" then
 			viewedUserDisplay = `{viewedUsername} ({effectiveProfileUserId})`
 		end
-		
+
 		print(`[PlayerState] {player.Name} is loading viewed profile {viewedUserDisplay} ({viewedModeLabel}).`)
 	end
 
@@ -881,7 +893,7 @@ function PlayerState.OnChanged(player: Player, pathOrKey: string, callback: Chan
 			end
 		elseif action == "TableInsert" then
 			local value, index = param1, param2
-			
+
 			callback(value, nil, {action = action, path = path, index = index})
 		elseif action == "TableRemove" then
 			local removedValue, index = param1, param2
@@ -1564,7 +1576,7 @@ end
 
 Players.PlayerRemoving:Connect(function(player)
 	if profiles[player] then
-		BeforeSave:Fire(player, profiles[player].Data)
+		_FireReleaseHooks(player, profiles[player].Data)
 	end
 
 	BatchModule.ClearPlayerBatch(player)
@@ -1587,7 +1599,7 @@ end)
 game:BindToClose(function()
 	for player, profile in profiles do
 		if profile then
-			BeforeSave:Fire(player, profile.Data)
+			_FireReleaseHooks(player, profile.Data)
 		end
 	end
 
@@ -1607,6 +1619,7 @@ game:BindToClose(function()
 end)
 
 PlayerState.BeforeSave = BeforeSave
+PlayerState.BeforeRelease = BeforeRelease
 PlayerState.ProfileLoaded = ProfileLoaded
 PlayerState.ProfileUnloaded = ProfileUnloaded
 PlayerState.MigrationResult = MigrationResult
