@@ -38,11 +38,11 @@ function Dict.SetInDict(replica: any, pathKeys: {string}, key: string, value: an
 		local fullPath = table.clone(pathKeys)
 		table.insert(fullPath, key)
 
-		local success = pcall(replica.Set, replica, fullPath, value)
-		return success
+		local ok, res = pcall(replica.Set, replica, fullPath, value)
+		return ok and res ~= false
 	elseif dict == nil then
-		local success = pcall(replica.Set, replica, pathKeys, { [key] = value })
-		return success
+		local ok, res = pcall(replica.Set, replica, pathKeys, { [key] = value })
+		return ok and res ~= false
 	end
 
 	return false
@@ -62,8 +62,8 @@ function Dict.RemoveFromDict(replica: any, pathKeys: {string}, key: string): boo
 	local fullPath = table.clone(pathKeys)
 	table.insert(fullPath, key)
 
-	local success = pcall(replica.Set, replica, fullPath, nil)
-	return success
+	local ok, res = pcall(replica.Set, replica, fullPath, nil)
+	return ok and res ~= false
 end
 
 return Dict

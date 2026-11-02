@@ -41,8 +41,37 @@ function DataUtils.GetNestedValue(data: any, pathKeys: {string}): any
 	return current
 end
 
-function DataUtils.CleanData(data: any, template: any): ()
+local function BuildKeepRootLookup(keepRoots: {string}?): {[string]: boolean}?
+	if typeof(keepRoots) ~= "table" then
+		return nil
+	end
+
+	local lookup: {[string]: boolean} = {}
+	local hasAny = false
+	for _, root in keepRoots do
+		if typeof(root) ~= "string" or root == "" then
+			continue
+		end
+
+		local dotIndex = string.find(root, ".", 1, true)
+		local rootSegment = if dotIndex then string.sub(root, 1, dotIndex - 1) else root
+		if rootSegment ~= "" then
+			lookup[rootSegment] = true
+			hasAny = true
+		end
+	end
+
+	return if hasAny then lookup else nil
+end
+
+function DataUtils.CleanData(data: any, template: any, keepRoots: {string}?): ()
+	local keepLookup = BuildKeepRootLookup(keepRoots)
+
 	for key in data do
+		if keepLookup and typeof(key) == "string" and keepLookup[key] then
+			continue
+		end
+
 		if template[key] == nil then
 			data[key] = nil
 		elseif typeof(data[key]) == "table" and typeof(template[key]) == "table" then
@@ -192,11 +221,98 @@ function DataUtils.IsPathInServerOnlyRoots(path: string, serverOnlyRoots: {strin
 	return DataUtils.IsPathInRuntimeRoots(path, serverOnlyRoots)
 end
 
-function DataUtils.CloneWithoutRoots(data: any, roots: {string}?): any
-	local clone = DeepClone(data)
-	DataUtils.RemoveRuntimeRoots(clone, roots)
+function DataUtils.IsArray(value: any): boolean
+	if typeof(value) ~= "table" then
+		return false
+	end
+
+	local length = #value
+	if length == 0 then
+		return false
+	end
+
+	local count = 0
+	for key in value do
+		if typeof(key) ~= "number" or key % 1 ~= 0 or key < 1 or key > length then
+			return false
+		end
+		count += 1
+	end
+
+	return count == length
+end
+
+type SkipNode = {[string]: SkipNode | boolean}
+
+local function BuildSkipTree(roots: {string}): SkipNode?
+	local tree: SkipNode = {}
+	local hasAny = false
+
+	for _, rootPath in roots do
+		if typeof(rootPath) ~= "string" or rootPath == "" then
+			continue
+		end
+
+		local pathKeys = GetPathKeys(rootPath)
+		if #pathKeys == 0 then
+			continue
+		end
+
+		local node: SkipNode = tree
+		for i = 1, #pathKeys do
+			local key = pathKeys[i]
+			local existing = node[key]
+
+			if existing == true then
+				break
+			end
+
+			if i == #pathKeys then
+				node[key] = true
+				hasAny = true
+			else
+				if typeof(existing) ~= "table" then
+					local child: SkipNode = {}
+					node[key] = child
+					existing = child
+				end
+				node = existing :: SkipNode
+			end
+		end
+	end
+
+	return if hasAny then tree else nil
+end
+
+local function CloneSkipping(value: any, node: SkipNode): any
+	local clone = {}
+
+	for key, child in value do
+		local skip = if typeof(key) == "string" then node[key] else nil
+
+		if skip == true then
+			continue
+		elseif typeof(skip) == "table" and typeof(child) == "table" then
+			clone[key] = CloneSkipping(child, skip :: SkipNode)
+		else
+			clone[key] = DeepClone(child)
+		end
+	end
 
 	return clone
+end
+
+function DataUtils.CloneWithoutRoots(data: any, roots: {string}?): any
+	if typeof(data) ~= "table" or typeof(roots) ~= "table" then
+		return DeepClone(data)
+	end
+
+	local skipTree = BuildSkipTree(roots)
+	if not skipTree then
+		return DeepClone(data)
+	end
+
+	return CloneSkipping(data, skipTree)
 end
 
 function DataUtils.RemoveRuntimeRoots(data: any, runtimeRoots: {string}?): boolean
@@ -271,23 +387,127 @@ function DataUtils.RestoreRuntimeRoots(data: any, captured: {[string]: any}?): (
 	end
 end
 
-function DataUtils.AttachRuntimeSaveProtection(profile: any, runtimeRoots: {string}?): ()
-	local capturedRuntimeData: {[string]: any}? = nil
+local function MergeRestoreRuntimeRoots(data: any, captured: {[string]: any}): ()
+	if typeof(data) ~= "table" then
+		return
+	end
 
-	local onSave = profile and (profile :: any).OnSave
+	for rootPath, capturedValue in captured do
+		if typeof(rootPath) ~= "string" or rootPath == "" then
+			continue
+		end
+
+		local pathKeys = GetPathKeys(rootPath)
+		local existingValue = GetNestedPathValue(data, pathKeys)
+
+		if existingValue == nil then
+			SetNestedPathValue(data, pathKeys, capturedValue)
+		elseif typeof(existingValue) == "table" and typeof(capturedValue) == "table" and existingValue ~= capturedValue then
+			for key, child in capturedValue do
+				if existingValue[key] == nil then
+					existingValue[key] = child
+				end
+			end
+		end
+	end
+end
+
+function DataUtils.AttachRuntimeSaveProtection(profile: any, runtimeRoots: {string}?, onErrorSignal: any?): ()
+	if not profile then
+		return
+	end
+
+	local pendingCapture: {[string]: any}? = nil
+	local errorConnection: any = nil
+
+	local function RestorePending(): ()
+		local captured = pendingCapture
+		if captured == nil then
+			return
+		end
+
+		pendingCapture = nil
+		MergeRestoreRuntimeRoots((profile :: any).Data, captured)
+	end
+
+	local function DisconnectError(): ()
+		local connection = errorConnection
+		errorConnection = nil
+		if connection then
+			pcall(function()
+				connection:Disconnect()
+			end)
+		end
+	end
+
+	local onSave = (profile :: any).OnSave
 	if onSave and onSave.Connect then
 		onSave:Connect(function()
+			RestorePending()
+
 			local data = (profile :: any).Data
-			capturedRuntimeData = DataUtils.CaptureAndRemoveRuntimeRoots(data, runtimeRoots)
+			local captured = DataUtils.CaptureAndRemoveRuntimeRoots(data, runtimeRoots)
+			local pending = pendingCapture
+			if pending then
+				for rootPath, value in captured do
+					pending[rootPath] = value
+				end
+			elseif next(captured) ~= nil then
+				pendingCapture = captured
+			end
 		end)
 	end
 
-	local onAfterSave = profile and (profile :: any).OnAfterSave
+	local onAfterSave = (profile :: any).OnAfterSave
 	if onAfterSave and onAfterSave.Connect then
 		onAfterSave:Connect(function()
-			local data = (profile :: any).Data
-			DataUtils.RestoreRuntimeRoots(data, capturedRuntimeData)
-			capturedRuntimeData = nil
+			RestorePending()
+		end)
+	end
+
+	local errorSignal: any = onErrorSignal
+	if errorSignal and typeof(errorSignal) == "table" and errorSignal.Connect then
+		local ok, connection = pcall(function()
+			return errorSignal:Connect(function(_message: any, storeName: any, profileKey: any)
+				local isActive = true
+				local isActiveFn = (profile :: any).IsActive
+				if typeof(isActiveFn) == "function" then
+					local activeOk, activeResult = pcall(isActiveFn, profile)
+					isActive = activeOk and activeResult == true
+				end
+
+				if not isActive then
+					DisconnectError()
+					return
+				end
+
+				if profileKey ~= (profile :: any).Key then
+					return
+				end
+
+				local profileStore = (profile :: any).ProfileStore
+				local expectedStoreName = if typeof(profileStore) == "table" then profileStore.Name else nil
+				if typeof(storeName) == "string" and typeof(expectedStoreName) == "string" and storeName ~= expectedStoreName then
+					return
+				end
+
+				RestorePending()
+			end)
+		end)
+
+		if ok then
+			errorConnection = connection
+		end
+	end
+
+	local onSessionEnd = (profile :: any).OnSessionEnd
+	if errorConnection and onSessionEnd and onSessionEnd.Connect then
+		local sessionEndConnection: any = nil
+		sessionEndConnection = onSessionEnd:Connect(function()
+			DisconnectError()
+			if sessionEndConnection then
+				sessionEndConnection:Disconnect()
+			end
 		end)
 	end
 end

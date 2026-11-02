@@ -24,8 +24,8 @@ function Array.UpdateArrayItem(replica: any, pathKeys: {string}, index: number, 
 	local fullPath: {string | number} = table.clone(pathKeys)
 	table.insert(fullPath, index)
 
-	local success = pcall(replica.Set, replica, fullPath :: any, newItem)
-	return success
+	local ok, res = pcall(replica.Set, replica, fullPath :: any, newItem)
+	return ok and res ~= false
 end
 
 return Array

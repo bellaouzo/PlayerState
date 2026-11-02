@@ -10,6 +10,7 @@ export type BatchModule = {
 	ProcessBatchOperations: (player: Player) -> (),
 	FlushBatch: (player: Player) -> (),
 	ClearPlayerBatch: (player: Player) -> (),
+	HasPendingBatch: (player: Player) -> boolean,
 }
 
 local function CreateBatchModule(
@@ -37,61 +38,154 @@ local function CreateBatchModule(
 			return
 		end
 
-		local groupedOps: {[string]: {[string]: any}} = {}
-		local singleOps: {{path: {string}, value: any}} = {}
-		local rootLevelOps: {[string]: any} = {}
+		batchOperations[player] = nil
+		batchScheduled[player] = nil
 
-		for i = 1, #playerBatch do
-			local operation = playerBatch[i]
-			local pathKeys = getPathKeys(operation.path)
+		local operationCount = #playerBatch
+		local pathKeysList: {{string}} = table.create(operationCount)
+		local pathStrings: {string} = table.create(operationCount)
+		local lastIndexByPath: {[string]: number} = {}
 
-			if #pathKeys == 1 then
-				rootLevelOps[pathKeys[1]] = operation.value
-			elseif #pathKeys == 2 then
-				local rootPath = pathKeys[1]
-				if not groupedOps[rootPath] then
-					groupedOps[rootPath] = {}
+		for i = 1, operationCount do
+			local pathKeys = getPathKeys(playerBatch[i].path)
+			local pathString = table.concat(pathKeys, ".")
+			pathKeysList[i] = pathKeys
+			pathStrings[i] = pathString
+			lastIndexByPath[pathString] = i
+		end
+
+		local hasPrefixConflict = false
+		for i = 1, operationCount do
+			local pathKeys = pathKeysList[i]
+			if #pathKeys < 2 then
+				continue
+			end
+
+			local prefix = pathKeys[1]
+			for depth = 1, #pathKeys - 1 do
+				if depth > 1 then
+					prefix = prefix .. "." .. pathKeys[depth]
 				end
-				groupedOps[rootPath][pathKeys[2]] = operation.value
-			else
-				singleOps[#singleOps + 1] = {path = pathKeys, value = operation.value}
+
+				if lastIndexByPath[prefix] ~= nil then
+					hasPrefixConflict = true
+					break
+				end
+			end
+
+			if hasPrefixConflict then
+				break
+			end
+		end
+
+		local function ApplySet(pathKeys: {string}, value: any): ()
+			local setPath = pathKeys
+			local setValue = value
+			local node = replica.Data
+
+			for depth = 1, #pathKeys - 1 do
+				local child = if typeof(node) == "table" then node[pathKeys[depth]] else nil
+				if child == nil then
+					if value == nil then
+						return
+					end
+
+					local subtree = value
+					for index = #pathKeys, depth + 1, -1 do
+						subtree = {[pathKeys[index]] = subtree}
+					end
+					setPath = table.move(pathKeys, 1, depth, 1, {})
+					setValue = subtree
+					break
+				end
+				node = child
+			end
+
+			local ok, res = pcall(replica.Set, replica, setPath, setValue)
+			if not (ok and res ~= false) then
+				warn(`[PlayerState] Batch Set failed for {player.Name}`)
+			end
+		end
+
+		local function ApplySetValues(pathKeys: {string}, values: {[string]: any}, label: string): ()
+			if next(values) == nil then
+				return
+			end
+
+			if #pathKeys == 1 and (replica.Data :: any)[pathKeys[1]] == nil then
+				local ok, res = pcall(replica.Set, replica, pathKeys, values)
+				if not (ok and res ~= false) then
+					warn(`[PlayerState] Batch {label} SetValues failed for {player.Name}`)
+				end
+				return
+			end
+
+			local ok, res = pcall(replica.SetValues, replica, pathKeys, values)
+			if not (ok and res ~= false) then
+				warn(`[PlayerState] Batch {label} SetValues failed for {player.Name}`)
 			end
 		end
 
 		replica:BeginBatch()
 
-		if next(rootLevelOps) then
-			local success = pcall(replica.SetValues, replica, {}, rootLevelOps)
-			if not success then
-				warn(`[PlayerState] Batch root SetValues failed for {player.Name}`)
+		if hasPrefixConflict then
+			for i = 1, operationCount do
+				ApplySet(pathKeysList[i], playerBatch[i].value)
 			end
-		end
+		else
+			local groupedOps: {[string]: {[string]: any}} = {}
+			local groupedOrder: {string} = {}
+			local singleOps: {{path: {string}, value: any}} = {}
+			local rootLevelOps: {[string]: any} = {}
 
-		for rootPath, values in groupedOps do
-			local success = pcall(replica.SetValues, replica, {rootPath}, values)
-			if not success then
-				warn(`[PlayerState] Batch grouped SetValues failed for {player.Name}`)
+			for i = 1, operationCount do
+				if lastIndexByPath[pathStrings[i]] ~= i then
+					continue
+				end
+
+				local pathKeys = pathKeysList[i]
+				local value = playerBatch[i].value
+
+				if value == nil or #pathKeys == 0 or #pathKeys > 2 then
+					singleOps[#singleOps + 1] = {path = pathKeys, value = value}
+				elseif #pathKeys == 1 then
+					rootLevelOps[pathKeys[1]] = value
+				else
+					local rootPath = pathKeys[1]
+					local group = groupedOps[rootPath]
+					if not group then
+						group = {}
+						groupedOps[rootPath] = group
+						groupedOrder[#groupedOrder + 1] = rootPath
+					end
+					group[pathKeys[2]] = value
+				end
 			end
-		end
 
-		for i = 1, #singleOps do
-			local operation = singleOps[i]
-			local success = pcall(replica.Set, replica, operation.path, operation.value)
-			if not success then
-				warn(`[PlayerState] Batch Set failed for {player.Name}`)
+			ApplySetValues({}, rootLevelOps, "root")
+
+			for _, rootPath in groupedOrder do
+				ApplySetValues({rootPath}, groupedOps[rootPath], "grouped")
+			end
+
+			for i = 1, #singleOps do
+				local operation = singleOps[i]
+				ApplySet(operation.path, operation.value)
 			end
 		end
 
 		replica:EndBatch()
 
-		local committedOps = table.create(#playerBatch)
-		table.move(playerBatch, 1, #playerBatch, 1, committedOps)
 		if onBatchCommitted then
+			local committedOps = table.create(operationCount)
+			table.move(playerBatch, 1, operationCount, 1, committedOps)
 			onBatchCommitted(player, committedOps)
 		end
+	end
 
-		batchOperations[player] = nil
-		batchScheduled[player] = nil
+	local function HasPendingBatch(player: Player): boolean
+		local playerBatch = batchOperations[player]
+		return playerBatch ~= nil and #playerBatch > 0
 	end
 
 	local function ScheduleBatchOperation(player: Player, operation: BatchOperation): ()
@@ -147,6 +241,7 @@ local function CreateBatchModule(
 		ProcessBatchOperations = ProcessBatchOperations,
 		FlushBatch = FlushBatch,
 		ClearPlayerBatch = ClearPlayerBatch,
+		HasPendingBatch = HasPendingBatch,
 	}
 end
 

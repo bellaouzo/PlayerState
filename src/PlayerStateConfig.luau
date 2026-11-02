@@ -34,7 +34,7 @@ local Config = {
 		
 		DataStore = {
 			-- DataStore name (change for different versions/environments)
-			Name = "PlayerData_0.01",
+			Name = "PlayerData_0.02",
 
 			-- Scope: "Production" for live data, "Testing" for mock data that won't save
 			Scope = "Production",

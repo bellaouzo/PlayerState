@@ -15,6 +15,50 @@ local function GetAppropriateValueType(value: number): string
 	end
 end
 
+type DescendantMapping = {
+	displayName: string,
+	relativeKeys: {string},
+}
+
+local function UpdateLeaderstatValue(leaderstats: Instance, displayName: string, newValue: any): ()
+	local valueObject = leaderstats:FindFirstChild(displayName)
+	if not valueObject then
+		return
+	end
+
+	if typeof(newValue) == "number" then
+		local requiredType = GetAppropriateValueType(newValue)
+		local currentType = valueObject.ClassName
+
+		if currentType ~= requiredType then
+			valueObject:Destroy()
+			local newValueObject = Instance.new(requiredType)
+			local newNumericValue = newValueObject :: any
+
+			newNumericValue.Value = newValue
+			newValueObject.Name = displayName
+			newValueObject.Parent = leaderstats
+		else
+			local numericValue = valueObject :: any
+			numericValue.Value = newValue
+		end
+	elseif valueObject:IsA("StringValue") then
+		(valueObject :: StringValue).Value = tostring(newValue or "")
+	end
+end
+
+local function GetRelativeValue(value: any, relativeKeys: {string}): any
+	local current = value
+	for i = 1, #relativeKeys do
+		if typeof(current) ~= "table" then
+			return nil
+		end
+		current = current[relativeKeys[i]]
+	end
+
+	return current
+end
+
 function Leaderstats.CreateLeaderstats(player: Player, profileData: any, getNestedValue: (data: any, path: string) -> any): ()
 	local leaderstatsConfig = profileData.leaderstats
 	if not leaderstatsConfig then
@@ -55,28 +99,7 @@ function Leaderstats.UpdateLeaderstatsForPath(player: Player, profileData: any, 
 
 	for displayName, configPath in leaderstatsConfig do
 		if configPath == path then
-			local valueObject = leaderstats:FindFirstChild(displayName)
-			if valueObject then
-				if typeof(newValue) == "number" then
-					local requiredType = GetAppropriateValueType(newValue)
-					local currentType = valueObject.ClassName
-
-					if currentType ~= requiredType then
-						valueObject:Destroy()
-						local newValueObject = Instance.new(requiredType)
-						local newNumericValue = newValueObject :: any
-
-						newNumericValue.Value = newValue
-						newValueObject.Name = displayName
-						newValueObject.Parent = leaderstats
-					else
-						local numericValue = valueObject :: any
-						numericValue.Value = newValue
-					end
-				elseif valueObject:IsA("StringValue") then
-					(valueObject :: StringValue).Value = tostring(newValue or "")
-				end
-			end
+			UpdateLeaderstatValue(leaderstats, displayName, newValue)
 
 			break
 		end
@@ -94,6 +117,70 @@ function Leaderstats.SetupLeaderstatsSync(player: Player, replica: any, getProfi
 
 	Leaderstats.CreateLeaderstats(player, profile.Data, getNestedValue)
 
+	local pathToDisplayNames: {[string]: {string}} = {}
+	local prefixToDescendants: {[string]: {DescendantMapping}} = {}
+
+	if typeof(leaderstatsConfig) == "table" then
+		for displayName, dataPath in leaderstatsConfig do
+			if typeof(displayName) ~= "string" or typeof(dataPath) ~= "string" or dataPath == "" then
+				continue
+			end
+
+			local displayNames = pathToDisplayNames[dataPath]
+			if not displayNames then
+				displayNames = {}
+				pathToDisplayNames[dataPath] = displayNames
+			end
+			table.insert(displayNames, displayName)
+
+			local segments: {string} = {}
+			for segment in string.gmatch(dataPath, "[^%.]+") do
+				table.insert(segments, segment)
+			end
+
+			local prefix = ""
+			for depth = 1, #segments - 1 do
+				prefix = if depth == 1 then segments[1] else prefix .. "." .. segments[depth]
+
+				local descendants = prefixToDescendants[prefix]
+				if not descendants then
+					descendants = {}
+					prefixToDescendants[prefix] = descendants
+				end
+
+				table.insert(descendants, {
+					displayName = displayName,
+					relativeKeys = table.move(segments, depth + 1, #segments, 1, {}),
+				})
+			end
+		end
+	end
+
+	local function ApplyForPath(pathString: string, value: any): ()
+		local displayNames = pathToDisplayNames[pathString]
+		local descendants = prefixToDescendants[pathString]
+		if not displayNames and not descendants then
+			return
+		end
+
+		local leaderstats = player:FindFirstChild("leaderstats")
+		if not leaderstats then
+			return
+		end
+
+		if displayNames then
+			for _, displayName in displayNames do
+				UpdateLeaderstatValue(leaderstats, displayName, value)
+			end
+		end
+
+		if descendants then
+			for _, descendant in descendants do
+				UpdateLeaderstatValue(leaderstats, descendant.displayName, GetRelativeValue(value, descendant.relativeKeys))
+			end
+		end
+	end
+
 	local originalSet = replica.Set
 	local originalSetValues = replica.SetValues
 
@@ -104,8 +191,13 @@ function Leaderstats.SetupLeaderstatsSync(player: Player, replica: any, getProfi
 			return success
 		end
 
-		local pathString = table.concat(path, ".")
-		Leaderstats.UpdateLeaderstatsForPath(player, profile.Data, pathString, value, validateProfile)
+		local firstKey = path[1]
+		if #path == 1 and typeof(firstKey) == "string" then
+			ApplyForPath(firstKey, value)
+		else
+			ApplyForPath(table.concat(path, "."), value)
+		end
+
 		return success
 	end
 
@@ -116,11 +208,17 @@ function Leaderstats.SetupLeaderstatsSync(player: Player, replica: any, getProfi
 			return success
 		end
 
-		local basePath = table.concat(path, ".")
-		for key, value in values do
-			local fullPath = basePath == "" and key or basePath .. "." .. key
-			Leaderstats.UpdateLeaderstatsForPath(player, profile.Data, fullPath, value, validateProfile)
+		if #path == 0 then
+			for key, value in values do
+				ApplyForPath(tostring(key), value)
+			end
+		else
+			local basePath = table.concat(path, ".")
+			for key, value in values do
+				ApplyForPath(basePath .. "." .. tostring(key), value)
+			end
 		end
+
 		return success
 	end
 end

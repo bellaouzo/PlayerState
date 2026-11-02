@@ -5,6 +5,32 @@ local DataUtils = require(script.Parent.DataUtils)
 
 local OfflineData = {}
 
+local OFFLINE_SESSION_DEADLINE = 5
+
+local function StartOfflineSession(profileStore: any, profileKey: string): (boolean, any)
+	local deadline = os.clock() + OFFLINE_SESSION_DEADLINE
+
+	return pcall(function()
+		return profileStore:StartSessionAsync(profileKey, {
+			Cancel = function(): boolean
+				return os.clock() >= deadline
+			end,
+		})
+	end)
+end
+
+local function SendSetDataMessage(profileStore: any, profileKey: string, path: string, value: any): boolean
+	local ok, sent = pcall(function()
+		return profileStore:MessageAsync(profileKey, {
+			Type = "SetData",
+			Path = path,
+			Value = value,
+		})
+	end)
+
+	return ok and sent == true
+end
+
 function OfflineData.GetOfflineData(
 	userId: number,
 	config: any,
@@ -73,11 +99,14 @@ function OfflineData.SetOfflineData(
 		end
 	end
 
-	local success, profile = pcall(function()
-		return profileStore:StartSessionAsync(profileKey)
-	end)
+	local success, profile = StartOfflineSession(profileStore, profileKey)
 
 	if not success or not profile then
+		if SendSetDataMessage(profileStore, profileKey, path, value) then
+			print(`[PlayerState] Profile for user {userId} was busy; sent data change message instead`)
+			return true
+		end
+
 		warn(`[PlayerState] Failed to start profile session for offline user {userId}`)
 		return false
 	end
@@ -116,9 +145,7 @@ function OfflineData.SetOfflineData(
 		return false
 	end
 
-	local capturedRuntimeData = DataUtils.CaptureAndRemoveRuntimeRoots(profile.Data, runtimeRoots)
-	profile:Save()
-	DataUtils.RestoreRuntimeRoots(profile.Data, capturedRuntimeData)
+	DataUtils.RemoveRuntimeRoots(profile.Data, runtimeRoots)
 	profile:EndSession()
 
 	print(`[PlayerState] Successfully set offline data for user {userId}: {path} = {value}`)

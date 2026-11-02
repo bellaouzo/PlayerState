@@ -226,13 +226,22 @@ local function ExtractLegacyPayload(payload: any, treatAsProfileStore: boolean):
 	return payload
 end
 
+local FETCH_RETRY_DELAYS = {1, 2}
+
+local function ShouldMergeTables(currentValue: any, legacyValue: any): boolean
+	return typeof(currentValue) == "table"
+		and typeof(legacyValue) == "table"
+		and not DataUtils.IsArray(currentValue)
+		and not DataUtils.IsArray(legacyValue)
+end
+
 local function MergeOverwrite(currentData: any, legacyData: any): any
 	if typeof(legacyData) ~= "table" then
 		return currentData
 	end
 
 	for key, legacyValue in legacyData do
-		if typeof(legacyValue) == "table" and typeof(currentData[key]) == "table" then
+		if ShouldMergeTables(currentData[key], legacyValue) then
 			MergeOverwrite(currentData[key], legacyValue)
 		else
 			currentData[key] = DeepClone(legacyValue)
@@ -255,7 +264,7 @@ local function MergeAuto(currentData: any, templateData: any, legacyData: any): 
 		local currentValue = currentData[key]
 		local templateValue = if typeof(templateData) == "table" then templateData[key] else nil
 
-		if typeof(legacyValue) == "table" and typeof(currentValue) == "table" then
+		if ShouldMergeTables(currentValue, legacyValue) then
 			MergeAuto(currentValue, templateValue, legacyValue)
 		elseif currentValue == nil or DeepEqual(currentValue, templateValue) then
 			currentData[key] = DeepClone(legacyValue)
@@ -293,18 +302,49 @@ local function GetLegacyStore(legacyConfig: any): any?
 	return store
 end
 
-local function FetchLegacyData(store: any, keyCandidates: {string}): (any?, string?)
+local function FetchLegacyData(store: any, keyCandidates: {string}): (any?, string?, boolean)
 	for _, key in keyCandidates do
 		local success, data = pcall(function()
 			return store:GetAsync(key)
 		end)
 
-		if success and data ~= nil then
-			return data, key
+		for _, retryDelay in FETCH_RETRY_DELAYS do
+			if success then
+				break
+			end
+
+			task.wait(retryDelay)
+			success, data = pcall(function()
+				return store:GetAsync(key)
+			end)
+		end
+
+		if not success then
+			warn(`[PlayerState] Legacy DataStore GetAsync failed for key "{key}": {data}`)
+			return nil, nil, true
+		end
+
+		if data ~= nil then
+			return data, key, false
 		end
 	end
 
-	return nil, nil
+	return nil, nil, false
+end
+
+local function RunCustomFetcher(customFetcher: any, keyCandidates: {string}, userId: number, player: Player?): (boolean, any, any)
+	local ok, payloadResult, keyResult = pcall(customFetcher, keyCandidates, userId, player)
+
+	for _, retryDelay in FETCH_RETRY_DELAYS do
+		if ok then
+			break
+		end
+
+		task.wait(retryDelay)
+		ok, payloadResult, keyResult = pcall(customFetcher, keyCandidates, userId, player)
+	end
+
+	return ok, payloadResult, keyResult
 end
 
 function LegacyMigration.TryMigrateProfile(
@@ -356,15 +396,16 @@ function LegacyMigration.TryMigrateProfile(
 	local customFetcher = normalizedConfig.FetchLegacyData
 	local legacyPayload
 	local keyUsed
+	local hadError = false
 
 	if typeof(customFetcher) == "function" then
-		local ok, payloadResult, keyResult = pcall(customFetcher, keyCandidates, userId, player)
+		local ok, payloadResult, keyResult = RunCustomFetcher(customFetcher, keyCandidates, userId, player)
 		if ok then
 			legacyPayload = payloadResult
 			keyUsed = keyResult
 		else
 			warn("[PlayerState] LegacyDataStore.FetchLegacyData failed")
-			result.reason = "fetch_failed"
+			hadError = true
 		end
 	else
 		local store = GetLegacyStore(normalizedConfig)
@@ -372,7 +413,12 @@ function LegacyMigration.TryMigrateProfile(
 			result.reason = "store_unavailable"
 			return result
 		end
-		legacyPayload, keyUsed = FetchLegacyData(store, keyCandidates)
+		legacyPayload, keyUsed, hadError = FetchLegacyData(store, keyCandidates)
+	end
+
+	if hadError then
+		result.reason = "fetch_failed"
+		return result
 	end
 
 	result.keyUsed = keyUsed
@@ -388,9 +434,7 @@ function LegacyMigration.TryMigrateProfile(
 			SetPath(profileData, markerPath, true)
 			result.markerWritten = true
 		end
-		if result.reason ~= "fetch_failed" then
-			result.reason = "no_legacy_data"
-		end
+		result.reason = "no_legacy_data"
 		return result
 	end
 
@@ -421,17 +465,25 @@ function LegacyMigration.TryMigrateProfile(
 		if typeof(transform) ~= "function" then
 			warn("[PlayerState] LegacyDataStore.MergeStrategy is Manual, but Transform is missing")
 			result.reason = "manual_transform_missing"
-		else
-			local success, transformed = pcall(transform, legacyData, template, player)
-			if success and typeof(transformed) == "table" then
-				DataUtils.RemoveRuntimeRoots(transformed, runtimeRoots)
-				MergeOverwrite(profileData, transformed)
-				result.reason = "applied"
-			elseif not success then
-				warn("[PlayerState] Legacy data transform failed")
-				result.reason = "manual_transform_failed"
-			end
+			return result
 		end
+
+		local success, transformed = pcall(transform, legacyData, template, player)
+		if not success then
+			warn("[PlayerState] Legacy data transform failed")
+			result.reason = "manual_transform_failed"
+			return result
+		end
+
+		if typeof(transformed) ~= "table" then
+			warn("[PlayerState] Legacy data transform must return a table")
+			result.reason = "manual_transform_invalid_result"
+			return result
+		end
+
+		DataUtils.RemoveRuntimeRoots(transformed, runtimeRoots)
+		MergeOverwrite(profileData, transformed)
+		result.reason = "applied"
 	else
 		MergeAuto(profileData, template, legacyData)
 		result.reason = "applied"

@@ -6,6 +6,30 @@ local Utils = require(script.Parent.Parent.Shared.Utils)
 
 local DataWipe = {}
 
+local OFFLINE_SESSION_DEADLINE = 5
+
+local function StartOfflineSession(profileStore: any, profileKey: string): (boolean, any)
+	local deadline = os.clock() + OFFLINE_SESSION_DEADLINE
+
+	return pcall(function()
+		return profileStore:StartSessionAsync(profileKey, {
+			Cancel = function(): boolean
+				return os.clock() >= deadline
+			end,
+		})
+	end)
+end
+
+local function SendWipeMessage(profileStore: any, profileKey: string): boolean
+	local ok, sent = pcall(function()
+		return profileStore:MessageAsync(profileKey, {
+			Type = "WipeData",
+		})
+	end)
+
+	return ok and sent == true
+end
+
 function DataWipe.WipePlayerData(
 	player: Player,
 	config: any,
@@ -91,11 +115,14 @@ function DataWipe.WipeOfflinePlayerData(
 		end
 	end
 
-	local success, profile = pcall(function()
-		return profileStore:StartSessionAsync(profileKey)
-	end)
+	local success, profile = StartOfflineSession(profileStore, profileKey)
 
 	if not success or not profile then
+		if SendWipeMessage(profileStore, profileKey) then
+			print(`[PlayerState] Profile for userId {userId} was busy; sent wipe data message instead`)
+			return true
+		end
+
 		warn(`[PlayerState] Failed to start profile session for offline userId {userId}`)
 		return false
 	end
@@ -118,9 +145,7 @@ function DataWipe.WipeOfflinePlayerData(
 	end
 
 	local runtimeRoots = DataUtils.ResolveRuntimeNonPersistentRoots(config.RuntimeNonPersistentRoots)
-	local capturedRuntimeData = DataUtils.CaptureAndRemoveRuntimeRoots(profile.Data, runtimeRoots)
-	profile:Save()
-	DataUtils.RestoreRuntimeRoots(profile.Data, capturedRuntimeData)
+	DataUtils.RemoveRuntimeRoots(profile.Data, runtimeRoots)
 	profile:EndSession()
 
 	print(`[PlayerState] Successfully wiped offline data for userId {userId}`)
