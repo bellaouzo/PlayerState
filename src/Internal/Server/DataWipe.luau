@@ -2,11 +2,66 @@
 
 local Players = game:GetService("Players")
 local DataUtils = require(script.Parent.DataUtils)
+local LegacyMigration = require(script.Parent.LegacyMigration)
 local Utils = require(script.Parent.Parent.Shared.Utils)
 
 local DataWipe = {}
 
+export type MigrationMarkerState = {
+	roots: {[string]: any},
+	markerKeys: {string},
+	markerValue: any,
+}
+
 local OFFLINE_SESSION_DEADLINE = 5
+local DEFAULT_MIGRATION_ROOT = "_Migration"
+
+function DataWipe.GetMigrationKeepRoots(config: any): {string}
+	local markerPath = LegacyMigration.ResolveMarkerPath(config.LegacyDataStore)
+	local markerRoot = string.split(markerPath, ".")[1]
+
+	if markerRoot == DEFAULT_MIGRATION_ROOT or markerRoot == "" then
+		return { DEFAULT_MIGRATION_ROOT }
+	end
+
+	return { DEFAULT_MIGRATION_ROOT, markerRoot }
+end
+
+function DataWipe.CaptureMigrationMarker(data: any, config: any): MigrationMarkerState
+	local markerKeys = string.split(LegacyMigration.ResolveMarkerPath(config.LegacyDataStore), ".")
+	local template = config.Profile.Template
+	local roots: {[string]: any} = {}
+
+	if typeof(data) == "table" then
+		for _, root in DataWipe.GetMigrationKeepRoots(config) do
+			if (typeof(template) ~= "table" or template[root] == nil) and data[root] ~= nil then
+				roots[root] = data[root]
+			end
+		end
+	end
+
+	return {
+		roots = roots,
+		markerKeys = markerKeys,
+		markerValue = DataUtils.GetNestedValue(data, markerKeys),
+	}
+end
+
+function DataWipe.RestoreMigrationMarker(data: any, state: MigrationMarkerState): ()
+	if typeof(data) ~= "table" then
+		return
+	end
+
+	for root, value in state.roots do
+		if data[root] == nil then
+			data[root] = value
+		end
+	end
+
+	if state.markerValue ~= nil and DataUtils.GetNestedValue(data, state.markerKeys) == nil then
+		DataUtils.SetNestedValue(data, state.markerKeys, state.markerValue)
+	end
+end
 
 local function StartOfflineSession(profileStore: any, profileKey: string): (boolean, any)
 	local deadline = os.clock() + OFFLINE_SESSION_DEADLINE
@@ -50,11 +105,14 @@ function DataWipe.WipePlayerData(
 		return false
 	end
 
+	local markerState = DataWipe.CaptureMigrationMarker(profile.Data, config)
+
 	local success = pcall(function()
 		table.clear(profile.Data)
 		for key, value in config.Profile.Template do
 			profile.Data[key] = if typeof(value) == "table" then Utils.DeepClone(value) else value
 		end
+		DataWipe.RestoreMigrationMarker(profile.Data, markerState)
 	end)
 
 	if not success then
@@ -130,12 +188,15 @@ function DataWipe.WipeOfflinePlayerData(
 	profile:AddUserId(userId)
 	profile:Reconcile()
 
+	local markerState = DataWipe.CaptureMigrationMarker(profile.Data, config)
+
 	cleanData(profile.Data, config.Profile.Template)
 
 	local wipeSuccess = pcall(function()
 		for key, value in config.Profile.Template do
 			profile.Data[key] = if typeof(value) == "table" then Utils.DeepClone(value) else value
 		end
+		DataWipe.RestoreMigrationMarker(profile.Data, markerState)
 	end)
 
 	if not wipeSuccess then

@@ -99,6 +99,10 @@ local CS_TAG = "REPLICA" -- CollectionService tag
 local REPLICATION_ALL = "ALL"
 local MAID_LOCK = {}
 local EMPTY_TABLE = {}
+local BATCH_SET = 1
+local BATCH_SET_VALUES = 2
+local BATCH_TABLE_INSERT = 3
+local BATCH_TABLE_REMOVE = 4
 
 local CollectionService = game:GetService("CollectionService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -138,6 +142,38 @@ local TokenValidate = {}
 local BindValuePrefab = Instance.new("NumberValue")
 BindValuePrefab.Name = "ReplicaBind"
 CollectionService:AddTag(BindValuePrefab, CS_TAG)
+
+local FreeRunnerThread
+
+local function AcquireRunnerThreadAndCallEventHandler(fn, ...)
+	local acquired_runner_thread = FreeRunnerThread
+	FreeRunnerThread = nil
+	fn(...)
+	FreeRunnerThread = acquired_runner_thread
+end
+
+local function RunEventHandlerInFreeThread(...)
+	AcquireRunnerThreadAndCallEventHandler(...)
+	while true do
+		AcquireRunnerThreadAndCallEventHandler(coroutine.yield())
+	end
+end
+
+local function FireReplication(replica, remote, ...)
+	local replication = replica.replication
+	if replication == nil then
+		return
+	end
+	if replication[REPLICATION_ALL] == true then
+		for player in pairs(ReadyPlayers) do
+			remote:FireClient(player, ...)
+		end
+	else
+		for player in pairs(replication) do
+			remote:FireClient(player, ...)
+		end
+	end
+end
 
 local function IterateGroup(replica, fn) -- fn(replica)
 	fn(replica)
@@ -362,7 +398,10 @@ end
 
 local function DispatchListenerSet(listener_set: {[any]: (action: string, path: {any}, param1: any, param2: any) -> ()}, action: string, path: {any}, param1: any, param2: any)
 	for _, listener in pairs(listener_set) do
-		task.spawn(listener, action, path, param1, param2)
+		if not FreeRunnerThread then
+			FreeRunnerThread = coroutine.create(RunEventHandlerInFreeThread)
+		end
+		task.spawn(FreeRunnerThread, listener, action, path, param1, param2)
 	end
 end
 
@@ -432,18 +471,20 @@ local function DispatchChange(self: Replica, action: string, path: {any}, param1
 		return
 	end
 
-	local path_key = PathToKey(path)
+	local size = #path
+	local key_parts = table.create(size)
+	for index = 1, size do
+		key_parts[index] = PathSegmentToKey(path[index])
+	end
+
+	local path_key = table.concat(key_parts, "\0")
 	local exact_set = self.exact_path_listeners[path_key]
 	if exact_set ~= nil then
 		DispatchListenerSet(exact_set, action, path, param1, param2)
 	end
 
-	if #path > 1 then
-		local key_parts = table.create(#path)
-		for index = 1, #path do
-			key_parts[index] = PathSegmentToKey(path[index])
-		end
-		for index = 1, #key_parts - 1 do
+	if size > 1 then
+		for index = 1, size - 1 do
 			local ancestor_key = table.concat(key_parts, "\0", 1, index)
 			local prefix_set = self.prefix_path_listeners[ancestor_key]
 			if prefix_set ~= nil then
@@ -486,24 +527,9 @@ function Replica:Set(path: {string}, value: any)
 	
 	if WriteFlag == false then
 		if self._batchMode == true then
-			table.insert(self._batchQueue, {
-				type = "Set",
-				path = path,
-				value = value
-			})
+			table.insert(self._batchQueue, {BATCH_SET, path, value})
 		else
-			local self_id = self.Id
-			if self.replication ~= nil then
-				if self.replication[REPLICATION_ALL] == true then
-					for player in pairs(ReadyPlayers) do
-						RemoteSet:FireClient(player, self_id, path, value)
-					end
-				else
-					for player in pairs(self.replication) do
-						RemoteSet:FireClient(player, self_id, path, value)
-					end
-				end
-			end
+			FireReplication(self, RemoteSet, self.Id, path, value)
 		end
 	end
 
@@ -527,24 +553,9 @@ function Replica:SetValues(path: {string}, values: {[string]: any})
 	
 	if WriteFlag == false then
 		if self._batchMode == true then
-			table.insert(self._batchQueue, {
-				type = "SetValues",
-				path = path,
-				values = values
-			})
+			table.insert(self._batchQueue, {BATCH_SET_VALUES, path, values})
 		else
-			local self_id = self.Id
-			if self.replication ~= nil then
-				if self.replication[REPLICATION_ALL] == true then
-					for player in pairs(ReadyPlayers) do
-						RemoteSetValues:FireClient(player, self_id, path, values)
-					end
-				else
-					for player in pairs(self.replication) do
-						RemoteSetValues:FireClient(player, self_id, path, values)
-					end
-				end
-			end
+			FireReplication(self, RemoteSetValues, self.Id, path, values)
 		end
 	end
 
@@ -570,17 +581,10 @@ function Replica:TableInsert(path: {string}, value: any, index: number?): number
 	-- Replicate change:
 	
 	if WriteFlag == false then
-		local self_id = self.Id
-		if self.replication ~= nil then
-			if self.replication[REPLICATION_ALL] == true then
-				for player in pairs(ReadyPlayers) do
-					RemoteTableInsert:FireClient(player, self_id, path, value, index)
-				end
-			else
-				for player in pairs(self.replication) do
-					RemoteTableInsert:FireClient(player, self_id, path, value, index)
-				end
-			end
+		if self._batchMode == true then
+			table.insert(self._batchQueue, {BATCH_TABLE_INSERT, path, value, index})
+		else
+			FireReplication(self, RemoteTableInsert, self.Id, path, value, index)
 		end
 	end
 
@@ -603,17 +607,10 @@ function Replica:TableRemove(path: {string}, index: number): any
 	-- Replicate change:
 	
 	if WriteFlag == false then
-		local self_id = self.Id
-		if self.replication ~= nil then
-			if self.replication[REPLICATION_ALL] == true then
-				for player in pairs(ReadyPlayers) do
-					RemoteTableRemove:FireClient(player, self_id, path, index)
-				end
-			else
-				for player in pairs(self.replication) do
-					RemoteTableRemove:FireClient(player, self_id, path, index)
-				end
-			end
+		if self._batchMode == true then
+			table.insert(self._batchQueue, {BATCH_TABLE_REMOVE, path, index})
+		else
+			FireReplication(self, RemoteTableRemove, self.Id, path, index)
 		end
 	end
 
@@ -692,21 +689,8 @@ function Replica:Write(function_name: string, ...): ...any
 	
 	-- Replicate change:
 	
-	local self_id = self.Id
-	local fn_id = write_lib_entry.Id
-	
-	if self.replication ~= nil then
-		if self.replication[REPLICATION_ALL] == true then
-			for player in pairs(ReadyPlayers) do
-				RemoteWrite:FireClient(player, self_id, fn_id, ...)
-			end
-		else
-			for player in pairs(self.replication) do
-				RemoteWrite:FireClient(player, self_id, fn_id, ...)
-			end
-		end
-	end
-	
+	FireReplication(self, RemoteWrite, self.Id, write_lib_entry.Id, ...)
+
 	return table.unpack(return_params)
 	
 end
@@ -720,18 +704,7 @@ function Replica:FireClient(player, ...)
 end
 
 function Replica:FireAllClients(...)
-	local self_id = self.Id
-	if self.replication ~= nil then
-		if self.replication[REPLICATION_ALL] == true then
-			for player in pairs(ReadyPlayers) do
-				RemoteSignal:FireClient(player, self_id, ...)
-			end
-		else
-			for player in pairs(self.replication) do
-				RemoteSignal:FireClient(player, self_id, ...)
-			end
-		end
-	end
+	FireReplication(self, RemoteSignal, self.Id, ...)
 end
 
 function Replica:UFireClient(player, ...)
@@ -743,18 +716,7 @@ function Replica:UFireClient(player, ...)
 end
 
 function Replica:UFireAllClients(...)
-	local self_id = self.Id
-	if self.replication ~= nil then
-		if self.replication[REPLICATION_ALL] == true then
-			for player in pairs(ReadyPlayers) do
-				RemoteSignalUnreliable:FireClient(player, self_id, ...)
-			end
-		else
-			for player in pairs(self.replication) do
-				RemoteSignalUnreliable:FireClient(player, self_id, ...)
-			end
-		end
-	end
+	FireReplication(self, RemoteSignalUnreliable, self.Id, ...)
 end
 
 function Replica:SetParent(new_parent)
@@ -1080,21 +1042,10 @@ function Replica:EndBatch()
 		return
 	end
 	
-	local self_id = self.Id
 	local operations = self._batchQueue
 	self._batchQueue = {}
-	
-	if self.replication ~= nil then
-		if self.replication[REPLICATION_ALL] == true then
-			for player in pairs(ReadyPlayers) do
-				RemoteBatchedOperations:FireClient(player, self_id, operations)
-			end
-		else
-			for player in pairs(self.replication) do
-				RemoteBatchedOperations:FireClient(player, self_id, operations)
-			end
-		end
-	end
+
+	FireReplication(self, RemoteBatchedOperations, self.Id, operations)
 end
 
 local function DestroyReplica(replica)
@@ -1192,7 +1143,7 @@ end
 
 RemoteRequestData.OnServerEvent:Connect(function(player: Player)
 	
-	if ReadyPlayers[player] ~= nil and player:IsDescendantOf(Players) == true then
+	if ReadyPlayers[player] ~= nil or player.Parent ~= Players then
 		return
 	end
 	

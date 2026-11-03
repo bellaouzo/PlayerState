@@ -35,6 +35,7 @@ function OfflineDataRemote.SetupServer(playerState: any): ()
 	local callWindows: {[Player]: {startedAt: number, count: number}} = {}
 	local cachedResults: {[number]: {data: any, expiresAt: number}} = {}
 	local cachedCount = 0
+	local pruneThreshold = CACHE_PRUNE_THRESHOLD
 
 	local function isRateLimited(player: Player): boolean
 		local now = os.clock()
@@ -60,6 +61,8 @@ function OfflineDataRemote.SetupServer(playerState: any): ()
 				cachedCount -= 1
 			end
 		end
+
+		pruneThreshold = math.max(CACHE_PRUNE_THRESHOLD, cachedCount * 2)
 	end
 
 	Players.PlayerRemoving:Connect(function(player: Player)
@@ -71,12 +74,16 @@ function OfflineDataRemote.SetupServer(playerState: any): ()
 			return nil
 		end
 
+		local requestedUserId = userId :: number
+		if requestedUserId ~= requestedUserId or requestedUserId == 0 or requestedUserId % 1 ~= 0 then
+			return nil
+		end
+
 		if isRateLimited(player) then
 			return nil
 		end
 
-		local requestedUserId = userId :: number
-		local isOnline = Players:GetPlayerByUserId(requestedUserId) ~= nil
+		local isOnline = Players:GetPlayerByUserId(requestedUserId :: any) ~= nil
 		local now = os.clock()
 
 		if not isOnline then
@@ -99,7 +106,7 @@ function OfflineDataRemote.SetupServer(playerState: any): ()
 			end
 			cachedResults[requestedUserId] = { data = visibleData, expiresAt = now + CACHE_SECONDS }
 
-			if cachedCount > CACHE_PRUNE_THRESHOLD then
+			if cachedCount > pruneThreshold then
 				pruneCache(now)
 			end
 		end

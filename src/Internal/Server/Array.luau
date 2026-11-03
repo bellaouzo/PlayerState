@@ -3,7 +3,7 @@
 local Array = {}
 
 function Array.AddToArray(replica: any, pathKeys: {string}, item: any): (boolean, string?)
-	local success, result = pcall(replica.TableInsert, replica, pathKeys, item)
+	local success, result = pcall(replica.TableInsert, replica, table.clone(pathKeys), item)
 	if not success then
 		return false, result
 	end
@@ -12,7 +12,7 @@ function Array.AddToArray(replica: any, pathKeys: {string}, item: any): (boolean
 end
 
 function Array.RemoveFromArray(replica: any, pathKeys: {string}, index: number): (boolean, string?)
-	local success, result = pcall(replica.TableRemove, replica, pathKeys, index)
+	local success, result = pcall(replica.TableRemove, replica, table.clone(pathKeys), index)
 	if not success then
 		return false, result
 	end
@@ -21,7 +21,7 @@ function Array.RemoveFromArray(replica: any, pathKeys: {string}, index: number):
 end
 
 function Array.UpdateArrayItem(replica: any, pathKeys: {string}, index: number, newItem: any): boolean
-	local fullPath: {string | number} = table.clone(pathKeys)
+	local fullPath: {string | number} = table.clone(pathKeys) :: any
 	table.insert(fullPath, index)
 
 	local ok, res = pcall(replica.Set, replica, fullPath :: any, newItem)

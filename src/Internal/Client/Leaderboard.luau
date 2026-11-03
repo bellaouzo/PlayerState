@@ -57,21 +57,29 @@ function Leaderboard.GetLeaderboard(replica: any?, statName: string, limit: numb
 		return {}
 	end
 
+	local maxCount = if typeof(limit) == "number" and limit > 0 then math.floor(limit) else math.huge
 	local entries: {LeaderboardEntry} = {}
+	local count = 0
+
+	if maxCount < 1 then
+		return entries
+	end
+
 	for _, entry in statLeaderboard do
 		if typeof(entry) == "table" and typeof(entry.userId) == "number" and typeof(entry.score) == "number" and typeof(entry.rank) == "number" then
-			entries[#entries + 1] = {
+			count += 1
+			entries[count] = {
 				userId = entry.userId,
 				score = entry.score,
 				rank = entry.rank,
 			}
+			if count >= maxCount then
+				break
+			end
 		end
 	end
 
-	local requestedLimit = if typeof(limit) == "number" and limit > 0 then math.floor(limit) else #entries
-	local clampedLimit = math.min(requestedLimit, #entries)
-
-	return table.move(entries, 1, clampedLimit, 1, {})
+	return entries
 end
 
 return Leaderboard

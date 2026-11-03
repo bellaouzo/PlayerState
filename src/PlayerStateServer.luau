@@ -34,6 +34,7 @@ local OfflineData = require(script.Parent.Internal.Server.OfflineData)
 local DataWipe = require(script.Parent.Internal.Server.DataWipe)
 local LegacyMigration = require(script.Parent.Internal.Server.LegacyMigration)
 local DebugState = require(script.Parent.Internal.Server.DebugState)
+local DataTypes = require(script.Parent.Internal.Shared.DataTypes)
 
 export type PlayerData = typeof(DefaultData)
 export type SharedSessionData = {[string]: any}
@@ -55,6 +56,12 @@ export type ReplicaInstance = ReplicaServer.Replica
 export type ArrayPath = string
 export type DictPath = string  
 export type ValuePath = string
+export type DataKey = DataTypes.DataKey
+export type DataPath = DataTypes.DataPath
+export type NumberPath = DataTypes.NumberPath
+export type TablePath = DataTypes.TablePath
+export type SharedKey = DataTypes.SharedKey
+export type SharedPath = DataTypes.SharedPath
 export type ChangeInfo = {
 	action: "Set" | "SetValues" | "TableInsert" | "TableRemove",
 	path: {any},
@@ -63,12 +70,12 @@ export type ChangeInfo = {
 export type ChangeCallback = (newValue: any, oldValue: any, info: ChangeInfo | {any}?) -> ()
 
 export type BatchOperation = {
-	path: ValuePath,
+	path: DataPath,
 	value: any,
 }
 
 export type BatchUpdateOperation = {
-	path: ValuePath,
+	path: NumberPath,
 	operation: "Increment" | "Decrement",
 	amount: number?,
 }
@@ -84,23 +91,23 @@ export type MigrationResultInfo = LegacyMigration.MigrationResult
 export type PlayerStateServer = {
 	SaveData: (player: Player) -> boolean,
 	Init: (player: Player, existingData: PlayerData?) -> boolean,
-	Set: (player: Player, key: string, value: any) -> boolean,
-	Get: (player: Player, key: string) -> any,
-	SetPath: (player: Player, path: ValuePath, value: any) -> boolean,
-	GetPath: (player: Player, path: ValuePath) -> any,
-	OnChanged: (player: Player, pathOrKey: string, callback: ChangeCallback) -> Connection?,
+	Set: (player: Player, key: DataKey, value: any) -> boolean,
+	Get: (player: Player, key: DataKey) -> any,
+	SetPath: (player: Player, path: DataPath, value: any) -> boolean,
+	GetPath: (player: Player, path: DataPath) -> any,
+	OnChanged: (player: Player, pathOrKey: DataPath, callback: ChangeCallback) -> Connection?,
 	SetValues: (player: Player, values: {[string]: any}) -> boolean,
 	BatchSetValues: (player: Player, operations: {BatchOperation}) -> boolean,
 	BatchUpdateValues: (player: Player, operations: {BatchUpdateOperation}) -> boolean,
-	Increment: (player: Player, path: ValuePath, amount: number?) -> boolean,
-	Decrement: (player: Player, path: ValuePath, amount: number?) -> boolean,
+	Increment: (player: Player, path: NumberPath, amount: number?) -> boolean,
+	Decrement: (player: Player, path: NumberPath, amount: number?) -> boolean,
 	FlushBatch: (player: Player) -> boolean,
-	AddToArray: (player: Player, arrayPath: ArrayPath, item: any) -> boolean,
-	RemoveFromArray: (player: Player, arrayPath: ArrayPath, index: number) -> boolean,
-	UpdateArrayItem: (player: Player, arrayPath: ArrayPath, index: number, newItem: any) -> boolean,
-	SetInDict: (player: Player, dictPath: DictPath, key: string | number, value: any) -> boolean,
-	GetFromDict: (player: Player, dictPath: DictPath, key: string | number) -> any,
-	RemoveFromDict: (player: Player, dictPath: DictPath, key: string | number) -> boolean,
+	AddToArray: (player: Player, arrayPath: TablePath, item: any) -> boolean,
+	RemoveFromArray: (player: Player, arrayPath: TablePath, index: number) -> boolean,
+	UpdateArrayItem: (player: Player, arrayPath: TablePath, index: number, newItem: any) -> boolean,
+	SetInDict: (player: Player, dictPath: TablePath, key: string | number, value: any) -> boolean,
+	GetFromDict: (player: Player, dictPath: TablePath, key: string | number) -> any,
+	RemoveFromDict: (player: Player, dictPath: TablePath, key: string | number) -> boolean,
 	Clone: (value: any, deep: boolean?) -> any,
 	GetReplica: (player: Player) -> ReplicaInstance?,
 	GetProfile: (player: Player) -> ProfileStoreProfile?,
@@ -108,18 +115,18 @@ export type PlayerStateServer = {
 	GetOfflineData: (userId: number) -> PlayerData?,
 	IsPlayerDataReady: (player: Player) -> boolean,
 	ClearPathCache: () -> (),
-	UpdateLeaderboard: (player: Player, statName: string, score: number) -> boolean,
-	GetLeaderboard: (statName: string, topCount: number) -> {LeaderboardEntry},
-	GetPlayerRank: (player: Player, statName: string) -> number?,
-	SetOfflineData: (userId: number, path: string, value: any) -> boolean,
+	UpdateLeaderboard: (player: Player, statName: NumberPath, score: number) -> boolean,
+	GetLeaderboard: (statName: NumberPath, topCount: number) -> {LeaderboardEntry},
+	GetPlayerRank: (player: Player, statName: NumberPath) -> number?,
+	SetOfflineData: (userId: number, path: DataPath, value: any) -> boolean,
 	WipePlayerData: (player: Player) -> boolean,
 	WipeOfflinePlayerData: (userId: number) -> boolean,
-	SetShared: (key: string, value: any) -> boolean,
-	GetShared: (key: string) -> any,
-	SetSharedPath: (path: ValuePath, value: any) -> boolean,
-	GetSharedPath: (path: ValuePath) -> any,
+	SetShared: (key: SharedKey, value: any) -> boolean,
+	GetShared: (key: SharedKey) -> any,
+	SetSharedPath: (path: SharedPath, value: any) -> boolean,
+	GetSharedPath: (path: SharedPath) -> any,
 	SetSharedValues: (values: {[string]: any}) -> boolean,
-	OnSharedChanged: (pathOrKey: string, callback: ChangeCallback) -> Connection?,
+	OnSharedChanged: (pathOrKey: SharedPath, callback: ChangeCallback) -> Connection?,
 	GetSharedReplica: () -> ReplicaInstance?,
 	GetSharedAll: () -> SharedSessionData?,
 	IsSharedReady: () -> boolean,
@@ -175,6 +182,18 @@ for _, root in SERVER_ONLY_ROOTS do
 	SERVER_ONLY_ROOT_LOOKUP[root] = true
 end
 
+local HAS_SERVER_ONLY = next(SERVER_ONLY_ROOT_LOOKUP) ~= nil
+local SKIP_UNCHANGED_WRITES = CONFIG.SkipUnchangedWrites == true
+local RUNTIME_ROOT_LOOKUP: {[string]: boolean} = {}
+
+for _, root in RUNTIME_NON_PERSISTENT_ROOTS do
+	if not string.find(root, ".", 1, true) then
+		RUNTIME_ROOT_LOOKUP[root] = true
+	end
+end
+
+local savesInFlight: {[any]: {[string]: any}} = DataUtils.PendingRuntimeCaptures
+
 if CONFIG.Leaderboard and CONFIG.Leaderboard.SyncInterval and CONFIG.Leaderboard.SyncInterval < 60 then
 	warn("[PlayerState] SyncInterval should be >= 60 seconds for optimal performance. Setting to 60.")
 
@@ -200,6 +219,8 @@ local initInFlight: {[Player]: boolean} = {}
 local releasingPlayers: {[Player]: boolean} = {}
 local pendingReadyConnections: {[Player]: any} = {}
 local reopenAttempts: {[Player]: number} = {}
+local releasedPlayers: {[Player]: boolean} = {}
+local endedProfiles: {[any]: boolean} = setmetatable({}, { __mode = "k" }) :: any
 local playerRegistries: {[Player]: any} = {}
 local dataWaiters: {[Player]: {[any]: boolean}} = {}
 local loadedProfiles: {[any]: boolean} = setmetatable({}, { __mode = "k" }) :: any
@@ -222,8 +243,39 @@ local PathCacheModule = CreatePathCache(CONFIG.MaxCacheSize)
 local GetPathKeys = PathCacheModule.GetPathKeys
 
 local function _FireReleaseHooks(player: Player, data: PlayerData)
+	if releasedPlayers[player] then
+		return
+	end
+
+	releasedPlayers[player] = true
 	BeforeRelease:Fire(player, data)
 	BeforeSave:Fire(player, data)
+end
+
+local function _EndProfileSession(profile: ProfileStoreProfile): ()
+	if endedProfiles[profile] then
+		return
+	end
+
+	endedProfiles[profile] = true
+	profile:EndSession()
+end
+
+local function _DataForRoot(profile: ProfileStoreProfile, root: string): any
+	local capture = savesInFlight[profile]
+	if capture ~= nil and RUNTIME_ROOT_LOOKUP[root] == true then
+		return capture
+	end
+
+	return profile.Data
+end
+
+local function _IsLeaderstatsPath(path: string): boolean
+	return string.byte(path, 1) == 108 and (path == "leaderstats" or string.sub(path, 1, 12) == "leaderstats.")
+end
+
+local function _IsUnchangedPrimitive(current: any, value: any): boolean
+	return current == value and typeof(value) ~= "table" and value == value
 end
 
 local function GetNestedValue(data: any, path: string): any
@@ -231,13 +283,8 @@ local function GetNestedValue(data: any, path: string): any
 	return DataUtils.GetNestedValue(data, keys)
 end
 
-local function SetNestedValue(data: any, path: string, value: any): boolean
-	local keys = GetPathKeys(path)
-	return DataUtils.SetNestedValue(data, keys, value)
-end
-
 local function IsServerOnlyPath(path: string): boolean
-	if typeof(path) ~= "string" or path == "" then
+	if not HAS_SERVER_ONLY or typeof(path) ~= "string" or path == "" then
 		return false
 	end
 
@@ -337,8 +384,8 @@ local BatchModule = CreateBatchModule(
 	end
 )
 
-local PlayerDataToken = ReplicaServer.Token("PlayerData")
-local SharedSessionToken = ReplicaServer.Token("SharedSession")
+local PlayerDataToken = ReplicaServer.Token("PlayerData") :: any
+local SharedSessionToken = ReplicaServer.Token("SharedSession") :: any
 
 local sharedSessionTemplate = if typeof(CONFIG.SharedSession) == "table" then CONFIG.SharedSession else {}
 
@@ -351,7 +398,7 @@ sharedReplica:Replicate()
 
 profileStore = ProfileService.New(
 	CONFIG.DataStore.Name,
-	CONFIG.Profile.Template
+	CONFIG.Profile.Template :: any
 )
 
 if CONFIG.DataStore.Scope == "Testing" then
@@ -382,11 +429,18 @@ local function _CollectRemoteModules(): {ModuleScript}
 	return remoteModuleScripts
 end
 
+type RemoteModule = {
+	SetupServer: ((playerState: PlayerStateServer) -> ())?,
+}
+
 local function _SetupRemoteModules(playerState: PlayerStateServer): ()
 	for _, moduleScript in _CollectRemoteModules() do
-		local remoteModule = require(moduleScript) :: any
-		if typeof(remoteModule) == "table" and typeof(remoteModule.SetupServer) == "function" then
-			remoteModule.SetupServer(playerState)
+		local remoteModule: RemoteModule? = require(moduleScript) :: any
+		if typeof(remoteModule) == "table" then
+			local setupServer = remoteModule.SetupServer
+			if typeof(setupServer) == "function" then
+				setupServer(playerState)
+			end
 		end
 	end
 end
@@ -540,9 +594,7 @@ local function _ResolveViewedUserSettings(): (number, boolean)
 	return viewedUserId, readOnly
 end
 
-local function _ResolveEffectiveProfileUserId(player: Player): number
-	local viewedUserId = _ResolveViewedUserSettings()
-
+local function _ResolveEffectiveProfileUserId(player: Player, viewedUserId: number): number
 	if viewedUserId == 0 then
 		return player.UserId
 	end
@@ -570,14 +622,6 @@ local function _GetWritableReplica(player: Player): ReplicaInstance?
 	end
 
 	return _GetPlayerReplica(player)
-end
-
-local function _GetWritableProfile(player: Player): ProfileStoreProfile?
-	if not _CanMutatePlayerData(player) then
-		return nil
-	end
-
-	return _GetPlayerProfile(player)
 end
 
 local function _GetWritableState(player: Player): (ProfileStoreProfile?, ReplicaInstance?)
@@ -638,16 +682,16 @@ function PlayerState.Init(player: Player, existingData: PlayerData?): boolean
 
 	initInFlight[player] = true
 
-	local effectiveProfileUserId = _ResolveEffectiveProfileUserId(player)
+	local viewedUserId, viewedReadOnly = _ResolveViewedUserSettings()
+	local effectiveProfileUserId = _ResolveEffectiveProfileUserId(player, viewedUserId)
 	local profileKey = CONFIG.Profile.Key .. "_" .. effectiveProfileUserId
-	local _, viewedReadOnly = _ResolveViewedUserSettings()
 	local isViewingAnotherUser = effectiveProfileUserId ~= player.UserId
 	local isMutationBlocked = isViewingAnotherUser and viewedReadOnly
 
 	if isViewingAnotherUser then
 		local viewedModeLabel = if viewedReadOnly then "read-only" else "writable"
 		local viewedUserDisplay = tostring(effectiveProfileUserId)
-		local ok, viewedUsername = pcall(Players.GetNameFromUserIdAsync, Players, effectiveProfileUserId)
+		local ok, viewedUsername = pcall(Players.GetNameFromUserIdAsync, Players, effectiveProfileUserId :: any)
 		if ok and type(viewedUsername) == "string" then
 			viewedUserDisplay = `{viewedUsername} ({effectiveProfileUserId})`
 		end
@@ -689,7 +733,7 @@ function PlayerState.Init(player: Player, existingData: PlayerData?): boolean
 		if ReplicaServer.ReadyPlayers[player] then
 			replica:Subscribe(player)
 		else
-			local conn
+			local conn: typeof(ReplicaServer.NewReadyPlayer:Connect(function(_: Player) end))
 			conn = ReplicaServer.NewReadyPlayer:Connect(function(p: Player)
 				if p ~= player then
 					return
@@ -721,13 +765,16 @@ function PlayerState.Init(player: Player, existingData: PlayerData?): boolean
 				return profiles[p]
 			end,
 			Validation.ValidateProfile,
-			GetNestedValue
+			GetNestedValue,
+			CONFIG.LeaderstatsOrder
 		)
 
 		if CONFIG.Leaderboard.Enabled then
 			if not leaderboardPeriodicStarted then
 				leaderboardPeriodicStarted = true
 				LeaderboardModule.StartPeriodicUpdates()
+			else
+				task.spawn(LeaderboardModule.SyncReplicaLeaderboardRanks, player, replica)
 			end
 		end
 
@@ -753,12 +800,14 @@ function PlayerState.Init(player: Player, existingData: PlayerData?): boolean
 		end)
 
 		if not ok or not profOrErr then
-			warn(`[PlayerState] StartSession failed for {player.Name}: {profOrErr}`)
+			if not isLoadCancelled() then
+				warn(`[PlayerState] StartSession failed for {player.Name}: {profOrErr}`)
+			end
 			return nil
 		end
 
 		local prof: ProfileStoreProfile = profOrErr
-		local migrationResult
+		local migrationResult: MigrationResultInfo
 
 		local setupOk, setupErr = pcall(function()
 			prof:AddUserId(player.UserId)
@@ -818,11 +867,12 @@ function PlayerState.Init(player: Player, existingData: PlayerData?): boolean
 				end
 				processed()
 			elseif message.Type == "WipeData" then
-				local template = CONFIG.Profile.Template
+				local template: {[string]: unknown} = CONFIG.Profile.Template :: any
 				local data = profile.Data :: any
+				local markerState = DataWipe.CaptureMigrationMarker(data, CONFIG)
 
 				for key in data do
-					if template[key] == nil and replicas[player] then
+					if template[key] == nil and markerState.roots[key] == nil and replicas[player] then
 						data[key] = nil
 						local replica = replicas[player]
 						if replica and (replica.Data :: any)[key] ~= nil then
@@ -836,6 +886,7 @@ function PlayerState.Init(player: Player, existingData: PlayerData?): boolean
 						PlayerState.Set(player, key :: string, CloneForReplica(value))
 					end
 				end
+				DataWipe.RestoreMigrationMarker(profile.Data, markerState)
 				processed()
 			end
 		end)
@@ -939,7 +990,25 @@ local function _GetPlayerRegistry(player: Player, replica: ReplicaInstance): any
 
 	registry = ListenerRegistry.new({
 		getPathKeys = GetPathKeys,
-		readValue = function(_pathKeys: {string}, pathOrKey: string): any
+		readValue = function(pathKeys: {string}, pathOrKey: string): any
+			if #pathKeys > 0 and Validation.ValidatePlayer(player) then
+				local profile = profiles[player]
+				if Validation.ValidateProfile(profile) then
+					local data: any = (profile :: ProfileStoreProfile).Data
+					local capture = savesInFlight[profile]
+					if capture ~= nil and RUNTIME_ROOT_LOOKUP[pathKeys[1]] == true then
+						data = capture
+					end
+
+					local result = DataUtils.GetNestedValue(data, pathKeys)
+					if AUTO_CLONE_TABLES and typeof(result) == "table" then
+						return Utils.DeepClone(result)
+					end
+
+					return result
+				end
+			end
+
 			return PlayerState.GetPath(player, pathOrKey)
 		end,
 	})
@@ -965,28 +1034,40 @@ local function _GetSharedRegistry(): any
 	return sharedRegistry
 end
 
-local function _SetPathInternal(player: Player, profile: ProfileStoreProfile, replica: ReplicaInstance, path: ValuePath, value: any): boolean
-	if path == "leaderstats" or string.sub(path, 1, 12) == "leaderstats." then
+local function _SetPathKeysInternal(player: Player, profile: ProfileStoreProfile, replica: ReplicaInstance, path: ValuePath, pathKeys: {string}, value: any): boolean
+	if _IsLeaderstatsPath(path) then
 		warn(`[PlayerState] Cannot directly modify leaderstats path "{path}". Change the actual data source that the leaderstat references instead.`)
 		return false
 	end
 
-	local shouldSyncLeaderboard = LeaderboardModule.IsStatTracked(path) and typeof(value) == "number"
+	local keyCount = #pathKeys
+	local root = pathKeys[1]
 
-	if IsServerOnlyPath(path) then
-		SetNestedValue(profile.Data, path, value)
+	if HAS_SERVER_ONLY and SERVER_ONLY_ROOT_LOOKUP[root] == true then
+		DataUtils.SetNestedValue(profile.Data, pathKeys, value)
 		return true
 	end
 
-	_FlushPendingBatch(player)
+	local shouldSyncLeaderboard = typeof(value) == "number" and LeaderboardModule.IsStatTracked(path)
 
-	if not string.find(path, ".", 1, true) then
-		local data = profile.Data :: any
-		local previousValue = data[path]
-		data[path] = value
+	local data: any = profile.Data
+	local capture = savesInFlight[profile]
+	if capture ~= nil and RUNTIME_ROOT_LOOKUP[root] == true then
+		data = capture
+	end
 
-		if not _ReplicaWrite(replica.Set, replica, {path}, CloneForReplica(value)) then
-			data[path] = previousValue
+	if keyCount == 1 then
+		if SKIP_UNCHANGED_WRITES and _IsUnchangedPrimitive(data[root], value) then
+			return true
+		end
+
+		_FlushPendingBatch(player)
+
+		local previousValue = data[root]
+		data[root] = value
+
+		if not _ReplicaWrite(replica.Set, replica, {root}, CloneForReplica(value)) then
+			data[root] = previousValue
 			warn(`[PlayerState] SetPath operation failed for {player.Name}`)
 			return false
 		end
@@ -998,11 +1079,16 @@ local function _SetPathInternal(player: Player, profile: ProfileStoreProfile, re
 		return true
 	end
 
-	local pathKeys = GetPathKeys(path)
+	if SKIP_UNCHANGED_WRITES and _IsUnchangedPrimitive(DataUtils.GetNestedValue(data, pathKeys), value) then
+		return true
+	end
+
+	_FlushPendingBatch(player)
+
 	local node: any = replica.Data
 	local missingIndex: number? = nil
 
-	for i = 1, #pathKeys - 1 do
+	for i = 1, keyCount - 1 do
 		local child = node[pathKeys[i]]
 		if child == nil then
 			missingIndex = i
@@ -1015,9 +1101,10 @@ local function _SetPathInternal(player: Player, profile: ProfileStoreProfile, re
 		node = child
 	end
 
-	local profileNode: any = profile.Data
+	local lastKey = pathKeys[keyCount]
+	local profileNode: any = data
 	local profileMissingIndex: number? = nil
-	for i = 1, #pathKeys - 1 do
+	for i = 1, keyCount - 1 do
 		local child = profileNode[pathKeys[i]]
 		if typeof(child) ~= "table" then
 			profileMissingIndex = i
@@ -1026,27 +1113,39 @@ local function _SetPathInternal(player: Player, profile: ProfileStoreProfile, re
 		profileNode = child
 	end
 
-	local previousValue = DataUtils.GetNestedValue(profile.Data, pathKeys)
-	local previousBranch = if profileMissingIndex then profileNode[pathKeys[profileMissingIndex]] else nil
-	DataUtils.SetNestedValue(profile.Data, pathKeys, value)
+	local previousValue: any = nil
+	local previousBranch: any = nil
+	if profileMissingIndex then
+		previousBranch = profileNode[pathKeys[profileMissingIndex]]
+		local createdNode: any = profileNode
+		for i = profileMissingIndex, keyCount - 1 do
+			local created = {}
+			createdNode[pathKeys[i]] = created
+			createdNode = created
+		end
+		createdNode[lastKey] = value
+	else
+		previousValue = profileNode[lastKey]
+		profileNode[lastKey] = value
+	end
 
 	local replicated
 	if missingIndex then
 		local subtree = CloneForReplica(value)
-		for i = #pathKeys, missingIndex + 1, -1 do
+		for i = keyCount, missingIndex + 1, -1 do
 			subtree = { [pathKeys[i]] = subtree }
 		end
 
 		replicated = _ReplicaWrite(replica.Set, replica, table.move(pathKeys, 1, missingIndex, 1, {}), subtree)
 	else
-		replicated = _ReplicaWrite(replica.Set, replica, pathKeys, CloneForReplica(value))
+		replicated = _ReplicaWrite(replica.Set, replica, table.clone(pathKeys), CloneForReplica(value))
 	end
 
 	if not replicated then
 		if profileMissingIndex then
 			profileNode[pathKeys[profileMissingIndex]] = previousBranch
 		else
-			DataUtils.SetNestedValue(profile.Data, pathKeys, previousValue)
+			profileNode[lastKey] = previousValue
 		end
 		warn(`[PlayerState] SetPath operation failed for {player.Name}`)
 		return false
@@ -1059,18 +1158,22 @@ local function _SetPathInternal(player: Player, profile: ProfileStoreProfile, re
 	return true
 end
 
+local function _SetPathInternal(player: Player, profile: ProfileStoreProfile, replica: ReplicaInstance, path: ValuePath, value: any): boolean
+	return _SetPathKeysInternal(player, profile, replica, path, GetPathKeys(path), value)
+end
+
 function PlayerState.Set(player: Player, key: string, value: any): boolean
 	local profile, replica = _GetWritableState(player)
 	if not profile or not replica then
 		return false
 	end
 
-	if string.find(key, "%.") then
+	if string.find(key, ".", 1, true) then
 		warn(`[PlayerState] Detected path syntax in Set() call. Use SetPath() instead for nested paths like "{key}"`)
 		return false
 	end
 
-	if key == "leaderstats" or string.sub(key, 1, 12) == "leaderstats." then
+	if _IsLeaderstatsPath(key) then
 		warn(`[PlayerState] Cannot directly modify leaderstats. Change the actual data source that the leaderstat references instead.`)
 		return false
 	end
@@ -1079,6 +1182,15 @@ function PlayerState.Set(player: Player, key: string, value: any): boolean
 
 	if IsServerOnlyRoot(key) then
 		data[key] = value
+		return true
+	end
+
+	local capture = savesInFlight[profile]
+	if capture ~= nil and RUNTIME_ROOT_LOOKUP[key] == true then
+		data = capture
+	end
+
+	if SKIP_UNCHANGED_WRITES and _IsUnchangedPrimitive(data[key], value) then
 		return true
 	end
 
@@ -1093,7 +1205,7 @@ function PlayerState.Set(player: Player, key: string, value: any): boolean
 		return false
 	end
 
-	if LeaderboardModule.IsStatTracked(key) and typeof(value) == "number" then
+	if typeof(value) == "number" and LeaderboardModule.IsStatTracked(key) then
 		LeaderboardModule.UpdateReplicaLeaderboardScore(replica, key, value :: number)
 	end
 
@@ -1110,7 +1222,13 @@ function PlayerState.Get(player: Player, key: string): any
 		return nil
 	end
 
-	local value = (profile.Data :: any)[key]
+	local data: any = profile.Data
+	local capture = savesInFlight[profile]
+	if capture ~= nil and RUNTIME_ROOT_LOOKUP[key] == true then
+		data = capture
+	end
+
+	local value = data[key]
 
 	if AUTO_CLONE_TABLES and typeof(value) == "table" then
 		return Utils.DeepClone(value)
@@ -1147,10 +1265,17 @@ function PlayerState.GetPath(player: Player, path: ValuePath): any
 	end
 
 	local result
-	if not string.find(path, ".", 1, true) then
-		result = (profile.Data :: any)[path]
+	local dotIndex = string.find(path, ".", 1, true)
+	local data: any = profile.Data
+	local capture = savesInFlight[profile]
+	if capture ~= nil and RUNTIME_ROOT_LOOKUP[if dotIndex then string.sub(path, 1, dotIndex - 1) else path] == true then
+		data = capture
+	end
+
+	if not dotIndex then
+		result = data[path]
 	else
-		result = GetNestedValue(profile.Data, path)
+		result = GetNestedValue(data, path)
 	end
 
 	if AUTO_CLONE_TABLES and typeof(result) == "table" then
@@ -1188,7 +1313,7 @@ function PlayerState.SetShared(key: string, value: any): boolean
 		return false
 	end
 
-	if string.find(key, "%.") then
+	if string.find(key, ".", 1, true) then
 		warn(`[PlayerState] Detected path syntax in SetShared() call. Use SetSharedPath() instead for nested paths like "{key}"`)
 		return false
 	end
@@ -1206,7 +1331,7 @@ function PlayerState.GetShared(key: string): any
 		return nil
 	end
 
-	if string.find(key, "%.") then
+	if string.find(key, ".", 1, true) then
 		warn(`[PlayerState] Detected path syntax in GetShared() call. Use GetSharedPath() instead for nested paths like "{key}"`)
 		return nil
 	end
@@ -1225,7 +1350,7 @@ function PlayerState.SetSharedPath(path: ValuePath, value: any): boolean
 		return false
 	end
 
-	local pathKeys = if string.find(path, ".", 1, true) then GetPathKeys(path) else {path}
+	local pathKeys = if string.find(path, ".", 1, true) then table.clone(GetPathKeys(path)) else {path}
 	if not _ReplicaWrite(sharedReplica.Set, sharedReplica, pathKeys, CloneForReplica(value)) then
 		warn("[PlayerState] SetSharedPath operation failed")
 		return false
@@ -1294,18 +1419,20 @@ function PlayerState.SetValues(player: Player, values: {[string]: any}): boolean
 	local replicatedValues: {[string]: any} = {}
 
 	for key, _ in values do
-		if key == "leaderstats" or string.sub(key, 1, 12) == "leaderstats." then
+		if _IsLeaderstatsPath(key) then
 			warn(`[PlayerState] Cannot directly modify leaderstats key "{key}" in SetValues. Change the actual data source that the leaderstat references instead.`)
 			return false
 		end
 	end
 
 	local data = profile.Data :: any
+	local capture = savesInFlight[profile]
 	local previousValues: {[string]: any} = {}
 
 	for key, value in values do
-		previousValues[key] = data[key]
-		data[key] = value
+		local target = if capture ~= nil and RUNTIME_ROOT_LOOKUP[key] == true then capture else data
+		previousValues[key] = target[key]
+		target[key] = value
 
 		if not IsServerOnlyRoot(key) then
 			replicatedValues[key] = CloneForReplica(value)
@@ -1320,15 +1447,39 @@ function PlayerState.SetValues(player: Player, values: {[string]: any}): boolean
 
 	if not _ReplicaWrite(replica.SetValues, replica, {}, replicatedValues) then
 		for key in replicatedValues do
-			data[key] = previousValues[key]
+			local target = if capture ~= nil and RUNTIME_ROOT_LOOKUP[key] == true then capture else data
+			target[key] = previousValues[key]
 		end
 		warn(`[PlayerState] SetValues operation failed for {player.Name}`)
 		return false
 	end
 
 	for key, value in replicatedValues do
-		if LeaderboardModule.IsStatTracked(key) and typeof(value) == "number" then
+		if typeof(value) == "number" and LeaderboardModule.IsStatTracked(key) then
 			LeaderboardModule.UpdateReplicaLeaderboardScore(replica, key, value :: number)
+		end
+	end
+
+	return true
+end
+
+local function _BatchSetValuesInternal(player: Player, profile: ProfileStoreProfile, operations: {BatchOperation}): boolean
+	for _, operation in operations do
+		if _IsLeaderstatsPath(operation.path) then
+			warn(`[PlayerState] Cannot directly modify leaderstats path "{operation.path}" in BatchSetValues. Change the actual data source that the leaderstat references instead.`)
+			return false
+		end
+	end
+
+	for _, operation in operations do
+		local pathKeys = GetPathKeys(operation.path)
+		DataUtils.SetNestedValue(_DataForRoot(profile, pathKeys[1]), pathKeys, operation.value)
+
+		if not IsServerOnlyPath(operation.path) then
+			BatchModule.ScheduleBatchOperation(player, {
+				path = operation.path,
+				value = CloneForReplica(operation.value),
+			})
 		end
 	end
 
@@ -1345,25 +1496,7 @@ function PlayerState.BatchSetValues(player: Player, operations: {BatchOperation}
 		return false
 	end
 
-	for _, operation in operations do
-		if operation.path == "leaderstats" or string.sub(operation.path, 1, 12) == "leaderstats." then
-			warn(`[PlayerState] Cannot directly modify leaderstats path "{operation.path}" in BatchSetValues. Change the actual data source that the leaderstat references instead.`)
-			return false
-		end
-	end
-
-	for _, operation in operations do
-		SetNestedValue(profile.Data, operation.path, operation.value)
-
-		if not IsServerOnlyPath(operation.path) then
-			BatchModule.ScheduleBatchOperation(player, {
-				path = operation.path,
-				value = CloneForReplica(operation.value),
-			})
-		end
-	end
-
-	return true
+	return _BatchSetValuesInternal(player, profile, operations)
 end
 
 function PlayerState.BatchUpdateValues(player: Player, operations: {BatchUpdateOperation}): boolean
@@ -1371,16 +1504,20 @@ function PlayerState.BatchUpdateValues(player: Player, operations: {BatchUpdateO
 		return false
 	end
 
-	local profile = _GetWritableProfile(player)
-	if not profile then
+	local profile, replica = _GetWritableState(player)
+	if not profile or not replica then
 		return false
 	end
 
 	local batchOperations: {BatchOperation} = {}
+	local pendingValues: {[string]: number} = {}
 
 	for _, op in operations do
-		local opKeys = GetPathKeys(op.path)
-		local currentValue = DataUtils.GetNestedValue(profile.Data, opKeys)
+		local currentValue: any = pendingValues[op.path]
+		if currentValue == nil then
+			local opKeys = GetPathKeys(op.path)
+			currentValue = DataUtils.GetNestedValue(_DataForRoot(profile, opKeys[1]), opKeys)
+		end
 
 		if typeof(currentValue) ~= "number" then
 			warn(`[PlayerState] Cannot {op.operation} non-numeric value at path: {op.path}`)
@@ -1399,13 +1536,14 @@ function PlayerState.BatchUpdateValues(player: Player, operations: {BatchUpdateO
 			return false
 		end
 
+		pendingValues[op.path] = newValue
 		table.insert(batchOperations, {
 			path = op.path,
 			value = newValue,
 		})
 	end
 
-	local success = PlayerState.BatchSetValues(player, batchOperations)
+	local success = _BatchSetValuesInternal(player, profile, batchOperations)
 
 	BatchModule.FlushBatch(player)
 
@@ -1432,7 +1570,7 @@ function PlayerState.AddToArray(player: Player, arrayPath: ArrayPath, item: any)
 	end
 
 	local pathKeys = GetPathKeys(arrayPath)
-	local array = DataUtils.GetNestedValue(profile.Data, pathKeys)
+	local array = DataUtils.GetNestedValue(_DataForRoot(profile, pathKeys[1]), pathKeys)
 	if typeof(array) ~= "table" then
 		warn(`[PlayerState] AddToArray path "{arrayPath}" is not an array for {player.Name}`)
 		return false
@@ -1464,7 +1602,7 @@ function PlayerState.RemoveFromArray(player: Player, arrayPath: ArrayPath, index
 	end
 
 	local pathKeys = GetPathKeys(arrayPath)
-	local array = DataUtils.GetNestedValue(profile.Data, pathKeys)
+	local array = DataUtils.GetNestedValue(_DataForRoot(profile, pathKeys[1]), pathKeys)
 	if typeof(array) ~= "table" then
 		warn(`[PlayerState] RemoveFromArray path "{arrayPath}" is not an array for {player.Name}`)
 		return false
@@ -1503,7 +1641,7 @@ function PlayerState.UpdateArrayItem(player: Player, arrayPath: ArrayPath, index
 	end
 
 	local pathKeys = GetPathKeys(arrayPath)
-	local array = DataUtils.GetNestedValue(profile.Data, pathKeys)
+	local array = DataUtils.GetNestedValue(_DataForRoot(profile, pathKeys[1]), pathKeys)
 	if typeof(array) ~= "table" then
 		warn(`[PlayerState] UpdateArrayItem path "{arrayPath}" is not an array for {player.Name}`)
 		return false
@@ -1537,7 +1675,7 @@ function PlayerState.SetInDict(player: Player, dictPath: DictPath, key: string |
 
 	local stringKey = if typeof(key) == "number" then tostring(key) else key
 	local pathKeys = GetPathKeys(dictPath)
-	local prior = DataUtils.GetNestedValue(profile.Data, pathKeys)
+	local prior = DataUtils.GetNestedValue(_DataForRoot(profile, pathKeys[1]), pathKeys)
 
 	if prior ~= nil and typeof(prior) ~= "table" then
 		warn(`[PlayerState] SetInDict path "{dictPath}" is not a dictionary for {player.Name}`)
@@ -1560,11 +1698,15 @@ function PlayerState.SetInDict(player: Player, dictPath: DictPath, key: string |
 		return false
 	end
 
+	if SKIP_UNCHANGED_WRITES and prior ~= nil and _IsUnchangedPrimitive(prior[stringKey], value) then
+		return true
+	end
+
 	_FlushPendingBatch(player)
 
 	local previousEntry = if prior ~= nil then prior[stringKey] else nil
 	if prior == nil then
-		DataUtils.SetNestedValue(profile.Data, pathKeys, {[stringKey] = value})
+		DataUtils.SetNestedValue(_DataForRoot(profile, pathKeys[1]), pathKeys, {[stringKey] = value})
 	else
 		prior[stringKey] = value
 	end
@@ -1573,7 +1715,7 @@ function PlayerState.SetInDict(player: Player, dictPath: DictPath, key: string |
 
 	if not success then
 		if prior == nil then
-			DataUtils.SetNestedValue(profile.Data, pathKeys, nil)
+			DataUtils.SetNestedValue(_DataForRoot(profile, pathKeys[1]), pathKeys, nil)
 		else
 			prior[stringKey] = previousEntry
 		end
@@ -1597,10 +1739,17 @@ function PlayerState.GetFromDict(player: Player, dictPath: DictPath, key: string
 	local stringKey = if typeof(key) == "number" then tostring(key) else key
 
 	local currentDict
-	if not string.find(dictPath, ".", 1, true) then
-		currentDict = (profile.Data :: any)[dictPath]
+	local dotIndex = string.find(dictPath, ".", 1, true)
+	local data: any = profile.Data
+	local capture = savesInFlight[profile]
+	if capture ~= nil and RUNTIME_ROOT_LOOKUP[if dotIndex then string.sub(dictPath, 1, dotIndex - 1) else dictPath] == true then
+		data = capture
+	end
+
+	if not dotIndex then
+		currentDict = data[dictPath]
 	else
-		currentDict = GetNestedValue(profile.Data, dictPath)
+		currentDict = GetNestedValue(data, dictPath)
 	end
 
 	if typeof(currentDict) ~= "table" then
@@ -1627,7 +1776,7 @@ function PlayerState.RemoveFromDict(player: Player, dictPath: DictPath, key: str
 
 	local stringKey = if typeof(key) == "number" then tostring(key) else key
 	local pathKeys = GetPathKeys(dictPath)
-	local dict = DataUtils.GetNestedValue(profile.Data, pathKeys)
+	local dict = DataUtils.GetNestedValue(_DataForRoot(profile, pathKeys[1]), pathKeys)
 
 	if typeof(dict) ~= "table" then
 		warn(`[PlayerState] RemoveFromDict failed - path is not a dictionary for {player.Name}`)
@@ -1737,7 +1886,7 @@ function PlayerState.SetOfflineData(userId: number, path: string, value: any): b
 		GetPathKeys,
 		function(data: any, template: any)
 			if CONFIG.CleanExtraFields then
-				DataUtils.CleanData(data, template)
+				DataUtils.CleanData(data, template, CLEAN_KEEP_ROOTS)
 			end
 		end
 	)
@@ -1771,7 +1920,7 @@ function PlayerState.WipeOfflinePlayerData(userId: number): boolean
 		PlayerState.WipePlayerData,
 		function(data: any, template: any)
 			if CONFIG.CleanExtraFields then
-				DataUtils.CleanData(data, template)
+				DataUtils.CleanData(data, template, CLEAN_KEEP_ROOTS)
 			end
 		end
 	)
@@ -1790,7 +1939,7 @@ end
 
 function PlayerState.Increment(player: Player, path: ValuePath, amount: number?): boolean
 	if not player then
-		print("[PlayerState] Invalid player for Increment")
+		warn("[PlayerState] Invalid player for Increment")
 		return false
 	end
 
@@ -1800,7 +1949,7 @@ function PlayerState.Increment(player: Player, path: ValuePath, amount: number?)
 	end
 
 	local pathKeys = GetPathKeys(path)
-	local currentValue = DataUtils.GetNestedValue(profile.Data, pathKeys)
+	local currentValue = DataUtils.GetNestedValue(_DataForRoot(profile, pathKeys[1]), pathKeys)
 	if typeof(currentValue) ~= "number" then
 		warn(`[PlayerState] Cannot increment non-numeric value at path: {path}`)
 		return false
@@ -1809,7 +1958,7 @@ function PlayerState.Increment(player: Player, path: ValuePath, amount: number?)
 	local incrementAmount = if amount ~= nil then amount else 1
 	local newValue = currentValue + incrementAmount
 
-	return _SetPathInternal(player, profile, replica, path, newValue)
+	return _SetPathKeysInternal(player, profile, replica, path, pathKeys, newValue)
 end
 
 function PlayerState.Decrement(player: Player, path: ValuePath, amount: number?): boolean
@@ -1889,7 +2038,7 @@ Players.PlayerRemoving:Connect(function(player)
 	LeaderboardModule.UpdatePlayerLeaderboard(player)
 
 	if profiles[player] then
-		profiles[player]:EndSession()
+		_EndProfileSession(profiles[player])
 		profiles[player] = nil
 	end
 	loadedProfileUserIds[player] = nil
@@ -1908,6 +2057,8 @@ Players.PlayerRemoving:Connect(function(player)
 	end
 
 	_WakeDataWaiters(player)
+
+	releasedPlayers[player] = nil
 
 	task.delay(RELEASE_FLAG_LIFETIME, function()
 		releasingPlayers[player] = nil
@@ -1934,7 +2085,7 @@ game:BindToClose(function()
 
 	for _, profile in profiles do
 		if profile then
-			profile:EndSession()
+			_EndProfileSession(profile)
 		end
 	end
 

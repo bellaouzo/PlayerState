@@ -2,7 +2,6 @@
 
 local Players = game:GetService("Players")
 local DataStoreService = game:GetService("DataStoreService")
-local DataUtils = require(script.Parent.DataUtils)
 
 export type LeaderboardEntry = {
 	userId: number,
@@ -22,8 +21,8 @@ export type LeaderboardModule = {
 	UpdateAllLeaderboards: () -> (),
 	GetLeaderboardInternal: (statName: string, limit: number) -> {LeaderboardEntry},
 	UpdateReplicaLeaderboardScore: (replica: any, statName: string, score: number) -> (),
-	SetupLeaderboardRankSaveProtection: (profile: any) -> (),
 	SyncPlayerLeaderboardRanks: () -> (),
+	SyncReplicaLeaderboardRanks: (player: Player, replica: any) -> (),
 	StartPeriodicUpdates: () -> (),
 	UpdatePlayerLeaderboard: (player: Player) -> (),
 	CancelPeriodicUpdates: () -> (),
@@ -61,8 +60,10 @@ local function CreateLeaderboardModule(
 	validatePlayer: (player: Player) -> boolean,
 	validateReplica: (replica: any?) -> boolean,
 	getReplicas: () -> {[Player]: any},
-	getNestedValue: (data: any, path: string) -> any
+	getNestedValue: (data: any, path: string) -> any,
+	dataStoreService: any?
 ): LeaderboardModule
+	local dataStores: any = if dataStoreService ~= nil then dataStoreService else DataStoreService
 	local leaderboardStores: {[string]: any} = {}
 	local leaderboardCache: {[string]: CachedLeaderboard} = {}
 	local leaderboardFetches: {[string]: LeaderboardFetch} = {}
@@ -74,6 +75,8 @@ local function CreateLeaderboardModule(
 	local WRITE_INTERVAL_SECONDS = 0.12
 	local MAX_WRITE_ATTEMPTS = 5
 	local BUDGET_RETRY_SECONDS = 1
+	local WRITE_BUDGET_RESERVE = 2
+	local FETCH_FAILURE_COOLDOWN_SECONDS = 10
 	local FLUSH_MAX_PARALLEL = 8
 	local FLUSH_DEFAULT_TIMEOUT_SECONDS = 20
 	local FLUSH_POLL_SECONDS = 0.05
@@ -86,7 +89,10 @@ local function CreateLeaderboardModule(
 	local lastWrittenScore: {[string]: number} = {}
 	local pendingWrites: {[string]: PendingWrite} = {}
 	local inFlightWrites: {[string]: PendingWrite} = {}
-	local releaseAfterWrite: {[string]: boolean} = {}
+	local releaseAfterWrite: {[string]: number} = {}
+	local fetchFailedAt: {[string]: number} = {}
+	local writeKeysByUser: {[number]: {[string]: string}} = {}
+	local userIdKeys: {[number]: string} = {}
 	local warnedInvalidScore: {[string]: boolean} = {}
 	local writeWorkerStarted = false
 	local idleWorkerThread: thread? = nil
@@ -94,8 +100,35 @@ local function CreateLeaderboardModule(
 	local lastWorkerWriteAt = -math.huge
 	local activeFlushes = 0
 
+	local function GetUserIdKey(userId: number): string
+		local userIdKey = userIdKeys[userId]
+		if userIdKey == nil then
+			userIdKey = tostring(userId)
+			userIdKeys[userId] = userIdKey
+		end
+
+		return userIdKey
+	end
+
 	local function GetWriteKey(statName: string, userId: number): string
-		return statName .. "|" .. tostring(userId)
+		local userKeys = writeKeysByUser[userId]
+		if userKeys == nil then
+			userKeys = {}
+			writeKeysByUser[userId] = userKeys
+		end
+
+		local key = userKeys[statName]
+		if key == nil then
+			key = statName .. "|" .. GetUserIdKey(userId)
+			userKeys[statName] = key
+		end
+
+		return key
+	end
+
+	local function ForgetUserKeys(userId: number): ()
+		writeKeysByUser[userId] = nil
+		userIdKeys[userId] = nil
 	end
 
 	local function WarnOnce(key: string, message: string): ()
@@ -124,7 +157,8 @@ local function CreateLeaderboardModule(
 	end
 
 	local function TryReleaseKey(key: string): ()
-		if not releaseAfterWrite[key] then
+		local userId = releaseAfterWrite[key]
+		if userId == nil then
 			return
 		end
 		if pendingWrites[key] ~= nil or inFlightWrites[key] ~= nil then
@@ -134,10 +168,11 @@ local function CreateLeaderboardModule(
 		releaseAfterWrite[key] = nil
 		lastWrittenScore[key] = nil
 		warnedInvalidScore[key] = nil
+		ForgetUserKeys(userId)
 	end
 
-	local function MarkReleaseAfterWrite(key: string): ()
-		releaseAfterWrite[key] = true
+	local function MarkReleaseAfterWrite(key: string, userId: number): ()
+		releaseAfterWrite[key] = userId
 		TryReleaseKey(key)
 	end
 
@@ -173,7 +208,19 @@ local function CreateLeaderboardModule(
 
 	local function HasWriteBudget(): boolean
 		local success, budget = pcall(function()
-			return DataStoreService:GetRequestBudgetForRequestType(Enum.DataStoreRequestType.SetIncrementSortedAsync)
+			return dataStores:GetRequestBudgetForRequestType(Enum.DataStoreRequestType.SetIncrementSortedAsync)
+		end)
+
+		if not success or typeof(budget) ~= "number" then
+			return true
+		end
+
+		return budget > WRITE_BUDGET_RESERVE
+	end
+
+	local function HasReadBudget(): boolean
+		local success, budget = pcall(function()
+			return dataStores:GetRequestBudgetForRequestType(Enum.DataStoreRequestType.GetSortedAsync)
 		end)
 
 		if not success or typeof(budget) ~= "number" then
@@ -308,15 +355,21 @@ local function CreateLeaderboardModule(
 			return
 		end
 
-		pendingWrites[key] = {
-			statName = statName,
-			userId = userId,
-			store = store,
-			userIdKey = tostring(userId),
-			value = value,
-			attempts = 0,
-			nextAttemptAt = if existing ~= nil then existing.nextAttemptAt else os.clock(),
-		}
+		if existing ~= nil then
+			existing.store = store
+			existing.value = value
+			existing.attempts = 0
+		else
+			pendingWrites[key] = {
+				statName = statName,
+				userId = userId,
+				store = store,
+				userIdKey = GetUserIdKey(userId),
+				value = value,
+				attempts = 0,
+				nextAttemptAt = os.clock(),
+			}
+		end
 
 		EnsureWriteWorker()
 		WakeWriteWorker()
@@ -461,7 +514,7 @@ local function CreateLeaderboardModule(
 			trackedStatSet[statName] = true
 			local storeName = config.Leaderboard.DataStoreName .. "_" .. statName:gsub("%.", "_")
 
-			leaderboardStores[statName] = DataStoreService:GetOrderedDataStore(storeName)
+			leaderboardStores[statName] = dataStores:GetOrderedDataStore(storeName)
 		end
 
 		EnsureWriteWorker()
@@ -562,6 +615,7 @@ local function CreateLeaderboardModule(
 			local success, entries, exhausted, covered = pcall(FetchSortedEntries, store, wanted)
 
 			if success then
+				fetchFailedAt[statName] = nil
 				leaderboardCache[statName] = {
 					data = entries,
 					lastUpdate = fetchTime,
@@ -570,6 +624,7 @@ local function CreateLeaderboardModule(
 				}
 				fetch.result = entries
 			else
+				fetchFailedAt[statName] = os.clock()
 				local cached = leaderboardCache[statName]
 				fetch.result = if cached then cached.data else {}
 			end
@@ -611,7 +666,18 @@ local function CreateLeaderboardModule(
 				return CopyLeaderboardEntries(cached.data, wanted)
 			end
 
-			local fetch = leaderboardFetches[statName] or StartLeaderboardFetch(statName, store, wanted)
+			local fetch: LeaderboardFetch
+			local activeFetch = leaderboardFetches[statName]
+			if activeFetch ~= nil then
+				fetch = activeFetch
+			else
+				local failedAt = fetchFailedAt[statName]
+				if failedAt ~= nil and os.clock() - failedAt < FETCH_FAILURE_COOLDOWN_SECONDS or not HasReadBudget() then
+					return if cached then CopyLeaderboardEntries(cached.data, wanted) else {}
+				end
+
+				fetch = StartLeaderboardFetch(statName, store, wanted)
+			end
 			if not fetch.done then
 				table.insert(fetch.waiting, coroutine.running())
 				coroutine.yield()
@@ -668,11 +734,56 @@ local function CreateLeaderboardModule(
 		end
 	end
 
-	local function SetupLeaderboardRankSaveProtection(profile: any): ()
-		if not config.Leaderboard.Enabled then return end
+	local function BuildPlayerRanks(leaderboardEntries: {LeaderboardEntry}): {[number]: {rank: number, score: number}}
+		local playerRanks: {[number]: {rank: number, score: number}} = {}
+		for _, entry in leaderboardEntries do
+			playerRanks[entry.userId] = {
+				rank = entry.rank,
+				score = entry.score,
+			}
+		end
 
-		local runtimeRoots = {"_LeaderboardRanks", "_Leaderboards", "_Leaderboard"}
-		DataUtils.AttachRuntimeSaveProtection(profile, runtimeRoots)
+		return playerRanks
+	end
+
+	local function ApplyLeaderboardToReplica(
+		replica: any,
+		userId: number,
+		statName: string,
+		leaderboardEntries: {LeaderboardEntry},
+		playerRanks: {[number]: {rank: number, score: number}}
+	): ()
+		local rankInfo = playerRanks[userId]
+		local currentRanks = (replica.Data :: any)._LeaderboardRanks
+		local currentLeaderboards = (replica.Data :: any)._Leaderboards
+		local currentStatRank = if typeof(currentRanks) == "table" then currentRanks[statName] else nil
+		local currentStatLeaderboard = if typeof(currentLeaderboards) == "table" then currentLeaderboards[statName] else nil
+
+		if not AreLeaderboardEntriesEqual(currentStatLeaderboard, leaderboardEntries) then
+			SetRuntimeStatValue(replica, "_Leaderboards", statName, CopyLeaderboardEntries(leaderboardEntries))
+		end
+
+		if rankInfo then
+			if typeof(currentStatRank) ~= "table"
+				or currentStatRank.rank ~= rankInfo.rank
+				or currentStatRank.score ~= rankInfo.score
+			then
+				SetRuntimeStatValue(replica, "_LeaderboardRanks", statName, {
+					rank = rankInfo.rank,
+					score = rankInfo.score,
+				})
+			end
+		else
+			local value = getNestedValue(replica.Data, statName)
+			if typeof(value) == "number" then
+				if typeof(currentStatRank) ~= "table" or currentStatRank.score ~= value then
+					SetRuntimeStatValue(replica, "_LeaderboardRanks", statName, {
+						rank = nil,
+						score = value,
+					})
+				end
+			end
+		end
 	end
 
 	local function SyncPlayerLeaderboardRanks(): ()
@@ -681,14 +792,7 @@ local function CreateLeaderboardModule(
 		local replicas = getReplicas()
 		for _, statName in config.Leaderboard.TrackedStats do
 			local leaderboardEntries = GetLeaderboardInternal(statName, 100)
-
-			local playerRanks: {[number]: {rank: number, score: number}} = {}
-			for _, entry in leaderboardEntries do
-				playerRanks[entry.userId] = {
-					rank = entry.rank,
-					score = entry.score,
-				}
-			end
+			local playerRanks = BuildPlayerRanks(leaderboardEntries)
 
 			for _, player in Players:GetPlayers() do
 				if not validatePlayer(player) then
@@ -700,38 +804,22 @@ local function CreateLeaderboardModule(
 					continue
 				end
 
-				local rankInfo = playerRanks[player.UserId]
-				local currentRanks = (replica.Data :: any)._LeaderboardRanks
-				local currentLeaderboards = (replica.Data :: any)._Leaderboards
-				local currentStatRank = if typeof(currentRanks) == "table" then currentRanks[statName] else nil
-				local currentStatLeaderboard = if typeof(currentLeaderboards) == "table" then currentLeaderboards[statName] else nil
-
-				if not AreLeaderboardEntriesEqual(currentStatLeaderboard, leaderboardEntries) then
-					SetRuntimeStatValue(replica, "_Leaderboards", statName, CopyLeaderboardEntries(leaderboardEntries))
-				end
-
-				if rankInfo then
-					if typeof(currentStatRank) ~= "table"
-						or currentStatRank.rank ~= rankInfo.rank
-						or currentStatRank.score ~= rankInfo.score
-					then
-						SetRuntimeStatValue(replica, "_LeaderboardRanks", statName, {
-							rank = rankInfo.rank,
-							score = rankInfo.score,
-						})
-					end
-				else
-					local value = getNestedValue(replica.Data, statName)
-					if typeof(value) == "number" then
-						if typeof(currentStatRank) ~= "table" or currentStatRank.score ~= value then
-							SetRuntimeStatValue(replica, "_LeaderboardRanks", statName, {
-								rank = nil,
-								score = value,
-							})
-						end
-					end
-				end
+				ApplyLeaderboardToReplica(replica, player.UserId, statName, leaderboardEntries, playerRanks)
 			end
+		end
+	end
+
+	local function SyncReplicaLeaderboardRanks(player: Player, replica: any): ()
+		if not config.Leaderboard.Enabled then return end
+
+		for _, statName in config.Leaderboard.TrackedStats do
+			local leaderboardEntries = GetLeaderboardInternal(statName, 100)
+
+			if not validatePlayer(player) or not validateReplica(replica) or getReplicas()[player] ~= replica then
+				return
+			end
+
+			ApplyLeaderboardToReplica(replica, player.UserId, statName, leaderboardEntries, BuildPlayerRanks(leaderboardEntries))
 		end
 	end
 
@@ -800,8 +888,10 @@ local function CreateLeaderboardModule(
 				end
 			end
 
-			MarkReleaseAfterWrite(GetWriteKey(statName, userId))
+			MarkReleaseAfterWrite(GetWriteKey(statName, userId), userId)
 		end
+
+		ForgetUserKeys(userId)
 	end
 
 	local function CancelPeriodicUpdates(): ()
@@ -819,8 +909,8 @@ local function CreateLeaderboardModule(
 		UpdateAllLeaderboards = UpdateAllLeaderboards,
 		GetLeaderboardInternal = GetLeaderboardInternal,
 		UpdateReplicaLeaderboardScore = UpdateReplicaLeaderboardScore,
-		SetupLeaderboardRankSaveProtection = SetupLeaderboardRankSaveProtection,
 		SyncPlayerLeaderboardRanks = SyncPlayerLeaderboardRanks,
+		SyncReplicaLeaderboardRanks = SyncReplicaLeaderboardRanks,
 		StartPeriodicUpdates = StartPeriodicUpdates,
 		UpdatePlayerLeaderboard = UpdatePlayerLeaderboard,
 		CancelPeriodicUpdates = CancelPeriodicUpdates,

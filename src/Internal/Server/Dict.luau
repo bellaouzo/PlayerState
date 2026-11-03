@@ -41,7 +41,7 @@ function Dict.SetInDict(replica: any, pathKeys: {string}, key: string, value: an
 		local ok, res = pcall(replica.Set, replica, fullPath, value)
 		return ok and res ~= false
 	elseif dict == nil then
-		local ok, res = pcall(replica.Set, replica, pathKeys, { [key] = value })
+		local ok, res = pcall(replica.Set, replica, table.clone(pathKeys), { [key] = value })
 		return ok and res ~= false
 	end
 

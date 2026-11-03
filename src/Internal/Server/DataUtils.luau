@@ -1,5 +1,13 @@
 --!strict
 
+type Connection = {
+	Disconnect: (self: Connection) -> (),
+}
+
+type ProfileSignal = {
+	Connect: (self: ProfileSignal, listener: (...any) -> ()) -> Connection,
+}
+
 local DataUtils = {}
 
 local INT32_MAX = 2147483647
@@ -134,18 +142,38 @@ function DataUtils.SetNestedValue(data: any, pathKeys: {string}, value: any): bo
 	return SetNestedPathValue(data, pathKeys, value)
 end
 
+local function ShallowCopy(value: any): any
+	if getmetatable(value) == nil then
+		return table.clone(value)
+	end
+
+	local copy = {}
+	for key, child in value do
+		copy[key] = child
+	end
+
+	return copy
+end
+
 local function DeepClone(value: any): any
 	if typeof(value) ~= "table" then
 		return value
 	end
 
-	local clone = {}
-	for key, child in value do
-		clone[key] = DeepClone(child)
+	local clone = ShallowCopy(value)
+	for key, child in clone do
+		if typeof(child) == "table" then
+			clone[key] = DeepClone(child)
+		end
 	end
 
 	return clone
 end
+
+DataUtils.DeepClone = DeepClone
+
+local PendingRuntimeCaptures: {[any]: {[string]: any}} = setmetatable({}, { __mode = "k" }) :: any
+DataUtils.PendingRuntimeCaptures = PendingRuntimeCaptures
 
 function DataUtils.IsPathInRuntimeRoots(path: string, runtimeRoots: {string}?): boolean
 	if typeof(path) ~= "string" or path == "" then
@@ -284,18 +312,34 @@ local function BuildSkipTree(roots: {string}): SkipNode?
 	return if hasAny then tree else nil
 end
 
-local function CloneSkipping(value: any, node: SkipNode): any
-	local clone = {}
+local SkipTreeCache: {[{string}]: SkipNode | false} = setmetatable({}, { __mode = "k" }) :: any
 
-	for key, child in value do
+local function GetSkipTree(roots: {string}): SkipNode?
+	local cached = SkipTreeCache[roots]
+	if cached ~= nil then
+		return if cached == false then nil else cached
+	end
+
+	local tree = BuildSkipTree(roots)
+	SkipTreeCache[roots] = if tree then tree else false
+
+	return tree
+end
+
+local function CloneSkipping(value: any, node: SkipNode): any
+	local clone = ShallowCopy(value)
+
+	for key, child in clone do
 		local skip = if typeof(key) == "string" then node[key] else nil
 
 		if skip == true then
-			continue
-		elseif typeof(skip) == "table" and typeof(child) == "table" then
-			clone[key] = CloneSkipping(child, skip :: SkipNode)
-		else
-			clone[key] = DeepClone(child)
+			clone[key] = nil
+		elseif typeof(child) == "table" then
+			if typeof(skip) == "table" then
+				clone[key] = CloneSkipping(child, skip :: SkipNode)
+			else
+				clone[key] = DeepClone(child)
+			end
 		end
 	end
 
@@ -307,7 +351,7 @@ function DataUtils.CloneWithoutRoots(data: any, roots: {string}?): any
 		return DeepClone(data)
 	end
 
-	local skipTree = BuildSkipTree(roots)
+	local skipTree = GetSkipTree(roots)
 	if not skipTree then
 		return DeepClone(data)
 	end
@@ -412,13 +456,21 @@ local function MergeRestoreRuntimeRoots(data: any, captured: {[string]: any}): (
 	end
 end
 
-function DataUtils.AttachRuntimeSaveProtection(profile: any, runtimeRoots: {string}?, onErrorSignal: any?): ()
+function DataUtils.GetPendingRuntimeCapture(profile: any): {[string]: any}?
+	return PendingRuntimeCaptures[profile]
+end
+
+function DataUtils.AttachRuntimeSaveProtection(profile: any, runtimeRoots: {string}?, onErrorSignal: any?): () -> {[string]: any}?
+	local function GetPending(): {[string]: any}?
+		return PendingRuntimeCaptures[profile]
+	end
+
 	if not profile then
-		return
+		return GetPending
 	end
 
 	local pendingCapture: {[string]: any}? = nil
-	local errorConnection: any = nil
+	local errorConnection: Connection? = nil
 
 	local function RestorePending(): ()
 		local captured = pendingCapture
@@ -427,6 +479,9 @@ function DataUtils.AttachRuntimeSaveProtection(profile: any, runtimeRoots: {stri
 		end
 
 		pendingCapture = nil
+		if PendingRuntimeCaptures[profile] == captured then
+			PendingRuntimeCaptures[profile] = nil
+		end
 		MergeRestoreRuntimeRoots((profile :: any).Data, captured)
 	end
 
@@ -440,32 +495,26 @@ function DataUtils.AttachRuntimeSaveProtection(profile: any, runtimeRoots: {stri
 		end
 	end
 
-	local onSave = (profile :: any).OnSave
+	local onSave: ProfileSignal? = (profile :: any).OnSave
 	if onSave and onSave.Connect then
 		onSave:Connect(function()
 			RestorePending()
 
 			local data = (profile :: any).Data
 			local captured = DataUtils.CaptureAndRemoveRuntimeRoots(data, runtimeRoots)
-			local pending = pendingCapture
-			if pending then
-				for rootPath, value in captured do
-					pending[rootPath] = value
-				end
-			elseif next(captured) ~= nil then
-				pendingCapture = captured
-			end
+			pendingCapture = captured
+			PendingRuntimeCaptures[profile] = captured
 		end)
 	end
 
-	local onAfterSave = (profile :: any).OnAfterSave
+	local onAfterSave: ProfileSignal? = (profile :: any).OnAfterSave
 	if onAfterSave and onAfterSave.Connect then
 		onAfterSave:Connect(function()
 			RestorePending()
 		end)
 	end
 
-	local errorSignal: any = onErrorSignal
+	local errorSignal: ProfileSignal? = onErrorSignal
 	if errorSignal and typeof(errorSignal) == "table" and errorSignal.Connect then
 		local ok, connection = pcall(function()
 			return errorSignal:Connect(function(_message: any, storeName: any, profileKey: any)
@@ -500,9 +549,9 @@ function DataUtils.AttachRuntimeSaveProtection(profile: any, runtimeRoots: {stri
 		end
 	end
 
-	local onSessionEnd = (profile :: any).OnSessionEnd
+	local onSessionEnd: ProfileSignal? = (profile :: any).OnSessionEnd
 	if errorConnection and onSessionEnd and onSessionEnd.Connect then
-		local sessionEndConnection: any = nil
+		local sessionEndConnection: Connection? = nil
 		sessionEndConnection = onSessionEnd:Connect(function()
 			DisconnectError()
 			if sessionEndConnection then
@@ -510,6 +559,8 @@ function DataUtils.AttachRuntimeSaveProtection(profile: any, runtimeRoots: {stri
 			end
 		end)
 	end
+
+	return GetPending
 end
 
 function DataUtils.ApplyRuntimeRootDefaults(data: any, template: any, runtimeRoots: {string}?): ()

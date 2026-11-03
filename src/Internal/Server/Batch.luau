@@ -42,15 +42,19 @@ local function CreateBatchModule(
 		batchScheduled[player] = nil
 
 		local operationCount = #playerBatch
-		local pathKeysList: {{string}} = table.create(operationCount)
-		local pathStrings: {string} = table.create(operationCount)
+		local pathKeysList: {{string}} = table.create(operationCount) :: any
+		local pathStrings: {string} = table.create(operationCount) :: any
 		local lastIndexByPath: {[string]: number} = {}
+		local hasDuplicatePaths = false
 
 		for i = 1, operationCount do
-			local pathKeys = getPathKeys(playerBatch[i].path)
-			local pathString = table.concat(pathKeys, ".")
+			local pathString = playerBatch[i].path
+			local pathKeys = getPathKeys(pathString)
 			pathKeysList[i] = pathKeys
 			pathStrings[i] = pathString
+			if lastIndexByPath[pathString] ~= nil then
+				hasDuplicatePaths = true
+			end
 			lastIndexByPath[pathString] = i
 		end
 
@@ -79,7 +83,7 @@ local function CreateBatchModule(
 		end
 
 		local function ApplySet(pathKeys: {string}, value: any): ()
-			local setPath = pathKeys
+			local setPath: {string}? = nil
 			local setValue = value
 			local node = replica.Data
 
@@ -101,7 +105,7 @@ local function CreateBatchModule(
 				node = child
 			end
 
-			local ok, res = pcall(replica.Set, replica, setPath, setValue)
+			local ok, res = pcall(replica.Set, replica, setPath or table.clone(pathKeys), setValue)
 			if not (ok and res ~= false) then
 				warn(`[PlayerState] Batch Set failed for {player.Name}`)
 			end
@@ -177,9 +181,17 @@ local function CreateBatchModule(
 		replica:EndBatch()
 
 		if onBatchCommitted then
-			local committedOps = table.create(operationCount)
-			table.move(playerBatch, 1, operationCount, 1, committedOps)
-			onBatchCommitted(player, committedOps)
+			if hasDuplicatePaths then
+				local committedOps: {BatchOperation} = {}
+				for i = 1, operationCount do
+					if lastIndexByPath[pathStrings[i]] == i then
+						committedOps[#committedOps + 1] = playerBatch[i]
+					end
+				end
+				onBatchCommitted(player, committedOps)
+			else
+				onBatchCommitted(player, playerBatch)
+			end
 		end
 	end
 

@@ -80,6 +80,10 @@ local BIND_TAG = "Bind"
 local CS_TAG = "REPLICA" -- CollectionService tag
 local MAID_LOCK = {}
 local REQUEST_DATA_REPEAT = 2
+local BATCH_SET = 1
+local BATCH_SET_VALUES = 2
+local BATCH_TABLE_INSERT = 3
+local BATCH_TABLE_REMOVE = 4
 
 local CollectionService = game:GetService("CollectionService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -173,9 +177,6 @@ export type Replica = {
 	IsActive: (self: any) -> (boolean),
 }
 
-local Connection = {}
-Connection.__index = Connection
-
 local FreeRunnerThread
 
 --[[
@@ -198,30 +199,6 @@ local function RunEventHandlerInFreeThread(...)
 	while true do
 		AcquireRunnerThreadAndCallEventHandler(coroutine.yield())
 	end
-end
-
-function ConnectionNew(t, fn)
-
-	local self = setmetatable({
-		t = t,
-		fn = fn,
-	}, Connection)
-
-	t[self] = true
-
-	return self
-
-end
-
-function ConnectionFire(self, ...)
-	if not FreeRunnerThread then
-		FreeRunnerThread = coroutine.create(RunEventHandlerInFreeThread)
-	end
-	task.spawn(FreeRunnerThread, self.fn, ...)
-end
-
-function Connection:Disconnect()
-	self.t[self] = nil
 end
 
 local Replica = {
@@ -255,9 +232,9 @@ local function ReplicaNew(id: number, self_creation: {}) -- self_creation = {tok
 
 		write_lib = write_lib,
 		
-		set_listeners = {}, -- [key] = {[connection] = true, ...}, ...
-		write_listeners = {}, -- [key] = {[connection] = true, ...}, ...
-		changed_listeners = {}, -- [connection] = true, ...
+		set_listeners = {}, -- {[key]: Signal}
+		write_listeners = {}, -- {[key]: Signal}
+		changed_listeners = Signal.New(),
 		
 	}, Replica)
 	
@@ -301,18 +278,33 @@ function Replica.OnNew(token: string, listener: (replica: Replica) -> ()): Conne
 	local listeners = NewReplicaListeners[token]
 	
 	if listeners == nil then
-		listeners = {}
+		listeners = Signal.New()
 		NewReplicaListeners[token] = listeners
 	end
-	
+
 	local existing_replicas = TokenReplicas[token]
-	
-	local connection = ConnectionNew(listeners, listener)
-	
+
+	local connection = listeners:Connect(listener)
+
 	if existing_replicas ~= nil then
+
+		local announce = {}
 		for replica in pairs(existing_replicas) do
-			ConnectionFire(connection, replica)
+			announce[replica] = true
 		end
+
+		task.defer(function()
+			for replica in pairs(announce) do
+				if connection.is_connected ~= true then
+					break
+				end
+				if not FreeRunnerThread then
+					FreeRunnerThread = coroutine.create(RunEventHandlerInFreeThread)
+				end
+				task.spawn(FreeRunnerThread, listener, replica)
+			end
+		end)
+
 	end
 	
 	return connection
@@ -336,25 +328,25 @@ function Replica:OnSet(path: {}, listener: () -> ()): Connection
 	local path_key = table.concat(path, ".")
 	local listeners = self.set_listeners[path_key]
 	if listeners == nil then
-		listeners = {}
+		listeners = Signal.New()
 		self.set_listeners[path_key] = listeners
 	end
-	
-	return ConnectionNew(listeners, listener)
+
+	return listeners:Connect(listener)
 end
 
 function Replica:OnWrite(function_name: string, listener: (...any) -> ()): Connection
 	local listeners = self.write_listeners[function_name]
 	if listeners == nil then
-		listeners = {}
+		listeners = Signal.New()
 		self.write_listeners[function_name] = listeners
 	end
-	
-	return ConnectionNew(listeners, listener)
+
+	return listeners:Connect(listener)
 end
 
 function Replica:OnChange(listener: (action: "Set" | "SetValues" | "TableInsert" | "TableRemove", path: {any}, param1: any, param2: any?) -> ()): Connection
-	return ConnectionNew(self.changed_listeners, listener)
+	return self.changed_listeners:Connect(listener)
 end
 
 function Replica:GetChild(token: string): Replica?
@@ -412,14 +404,10 @@ function Replica:Set(path: {string}, value: any)
 	if next(self.set_listeners) ~= nil then
 		local listeners = self.set_listeners[table.concat(path, ".")]
 		if listeners ~= nil then
-			for connection in pairs(listeners) do
-				ConnectionFire(connection, value, old_value)
-			end
+			listeners:Fire(value, old_value)
 		end
 	end
-	for connection in pairs(self.changed_listeners) do
-		ConnectionFire(connection, "Set", path, value, old_value)
-	end
+	self.changed_listeners:Fire("Set", path, value, old_value)
 	
 end
 
@@ -441,9 +429,7 @@ function Replica:SetValues(path: {string}, values: {[string]: any})
 	
 	-- Firing signals:
 
-	for connection in pairs(self.changed_listeners) do
-		ConnectionFire(connection, "SetValues", path, values)
-	end
+	self.changed_listeners:Fire("SetValues", path, values)
 	
 end
 
@@ -468,9 +454,7 @@ function Replica:TableInsert(path: {string}, value: any, index: number?): number
 	
 	-- Firing signals:
 
-	for connection in pairs(self.changed_listeners) do
-		ConnectionFire(connection, "TableInsert", path, value, index)
-	end
+	self.changed_listeners:Fire("TableInsert", path, value, index)
 	
 	return index
 	
@@ -492,9 +476,7 @@ function Replica:TableRemove(path: {string}, index: number): any
 	
 	-- Firing signals:
 
-	for connection in pairs(self.changed_listeners) do
-		ConnectionFire(connection, "TableRemove", path, removed_value, index)
-	end
+	self.changed_listeners:Fire("TableRemove", path, removed_value, index)
 	
 	return removed_value
 	
@@ -515,9 +497,7 @@ function Replica:Write(function_name: string, ...): ...any
 	
 	local listeners = self.write_listeners[function_name]
 	if listeners ~= nil then
-		for connection in pairs(listeners) do
-			ConnectionFire(connection, ...)
-		end
+		listeners:Fire(...)
 	end
 	
 	return table.unpack(return_params)
@@ -526,7 +506,7 @@ end
 
 local function DestroyReplica(replica, is_depth_call)
 	-- Scan children replicas:
-	for _, child in ipairs(replica.Children) do
+	for child in pairs(replica.Children) do
 		DestroyReplica(child, true)
 	end
 
@@ -609,13 +589,11 @@ local function ReplicaFromBindBuffer(replica, announce_buffer)
 		for _, replica in ipairs(announce_buffer) do
 			local listeners = NewReplicaListeners[replica.Token]
 			if listeners ~= nil then
-				for connection in pairs(listeners) do
-					ConnectionFire(connection, replica)
-				end
+				listeners:Fire(replica)
 			end
 		end
 	end
-	
+
 end
 
 local function CreationScan(nested_creation, iterator, parent_id)
@@ -797,38 +775,41 @@ RemoteWrite.OnClientEvent:Connect(function(id: number, fn_id: number, ...)
 	end
 end)
 
+local function ApplyBatchedOperations(replica, operations: {})
+	for _, operation in ipairs(operations) do
+		local op_id = operation[1]
+
+		if op_id == BATCH_SET then
+			replica.Set(replica, operation[2], operation[3])
+		elseif op_id == BATCH_SET_VALUES then
+			local base_path = operation[2]
+			local base_size = #base_path
+			local path_buffer = table.move(base_path, 1, base_size, 1, table.create(base_size + 1))
+			local changed_listeners = replica.changed_listeners
+			for key, value in pairs(operation[3]) do
+				path_buffer[base_size + 1] = key
+				if changed_listeners:GetListenerCount() == 0 and next(replica.set_listeners) == nil then
+					replica.Set(replica, path_buffer, value)
+				else
+					replica.Set(replica, table.clone(path_buffer), value)
+				end
+			end
+		elseif op_id == BATCH_TABLE_INSERT then
+			replica.TableInsert(replica, operation[2], operation[3], operation[4])
+		elseif op_id == BATCH_TABLE_REMOVE then
+			replica.TableRemove(replica, operation[2], operation[3])
+		end
+	end
+end
+
 RemoteBatchedOperations.OnClientEvent:Connect(function(id: number, operations: {})
 	local replica = GetInternalReplica(id)
 	ReplicationFlag = true
-	
-	for _, operation in ipairs(operations) do
-		local success, msg
-		
-		if operation.type == "Set" then
-			success, msg = pcall(replica.Set, replica, operation.path, operation.value)
-		elseif operation.type == "SetValues" then
-			local basePath = operation.path
-			for key, value in pairs(operation.values) do
-				local fullPath = table.create(#basePath + 1)
-				for i = 1, #basePath do
-					fullPath[i] = basePath[i]
-				end
-				fullPath[#basePath + 1] = key
-				
-				success, msg = pcall(replica.Set, replica, fullPath, value)
-				if success ~= true then
-					break
-				end
-			end
-		end
-		
-		if success ~= true then
-			ReplicationFlag = false
-			error(`[{script.Name}]: Error while updating replica (batched operation):\n{replica:Identify()}\n` .. msg)
-		end
-	end
-	
+	local success, msg = pcall(ApplyBatchedOperations, replica, operations)
 	ReplicationFlag = false
+	if success ~= true then
+		error(`[{script.Name}]: Error while updating replica (batched operation):\n{replica:Identify()}\n` .. tostring(msg))
+	end
 end)
 
 local function RemoteSignalHandle(id: number, ...)
@@ -913,9 +894,7 @@ RemoteCreate.OnClientEvent:Connect(function(creation: {}, root_id: number?) -- (
 	for _, replica in ipairs(announce_buffer) do
 		local listeners = NewReplicaListeners[replica.Token]
 		if listeners ~= nil then
-			for connection in pairs(listeners) do
-				ConnectionFire(connection, replica)
-			end
+			listeners:Fire(replica)
 		end
 	end
 

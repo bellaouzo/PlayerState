@@ -154,6 +154,7 @@ function Maid:Add(object: any)
 	
 	if self.is_cleaned == true then
 		CleanupInThread(object)
+		return MaidToken.New(self, nil)
 	end
 	
 	local object_type = typeof(object)

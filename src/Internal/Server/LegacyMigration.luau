@@ -17,18 +17,7 @@ export type MigrationResult = {
 	reason: string,
 }
 
-local function DeepClone(value: any): any
-	if typeof(value) ~= "table" then
-		return value
-	end
-
-	local cloned = {}
-	for key, child in value do
-		cloned[key] = DeepClone(child)
-	end
-
-	return cloned
-end
+local DeepClone = DataUtils.DeepClone
 
 local function DeepEqual(a: any, b: any): boolean
 	if a == b then
@@ -178,6 +167,16 @@ local function NormalizeLegacyConfig(legacyConfig: any): any
 	end
 
 	return normalized
+end
+
+function LegacyMigration.ResolveMarkerPath(legacyConfig: any): string
+	local normalizedConfig = NormalizeLegacyConfig(legacyConfig)
+	local markerPath = if typeof(normalizedConfig) == "table" then normalizedConfig.MigrationMarkerPath else nil
+	if typeof(markerPath) ~= "string" or markerPath == "" then
+		return "_Migration.LegacyDataStoreV1"
+	end
+
+	return markerPath
 end
 
 local function ResolveCandidateKeys(userId: number, candidates: {string}?): {string}

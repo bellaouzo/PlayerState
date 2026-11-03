@@ -427,6 +427,21 @@ local function RegisterError(error_message, store_name, profile_key) -- Called w
 	OnError:Fire(tostring(error_message), store_name, profile_key)
 end
 
+local PermanentErrorCodes = {
+	[103] = true,
+	[104] = true,
+	[105] = true,
+	[511] = true,
+}
+
+local function IsPermanentError(error_message)
+	if type(error_message) ~= "string" then
+		return false
+	end
+	local error_code = tonumber(string.match(error_message, "^%s*(%d+):"))
+	return error_code ~= nil and PermanentErrorCodes[error_code] == true
+end
+
 local function RegisterOverwrite(store_name, profile_key) -- Called when a corrupted profile is loaded
 	warn(`[{script.Name}]: Invalid profile was overwritten (STORE:{store_name}; KEY:{profile_key})`)
 	OnOverwrite:Fire(store_name, profile_key)
@@ -512,7 +527,7 @@ local function UpdateAsync(profile_store, profile_key, transform_params, is_user
 	--}
 
 	local loaded_data, key_info
-
+	
 	local next_in_queue = WaitInUpdateQueue(SessionToken(profile_store.Name, profile_key, is_user_mock))
 
 	local success = true
@@ -650,7 +665,7 @@ local function UpdateAsync(profile_store, profile_key, transform_params, is_user
 			profile_key
 		)
 		-- Return nothing:
-		return nil
+		return nil, nil, error_message
 	end
 
 end
@@ -738,14 +753,14 @@ local function SaveProfileAsync(profile, is_ending_session, is_overwriting, last
 			repeat_save_flag = false
 		end
 
-		local loaded_data, key_info = UpdateAsync(
+		local loaded_data, key_info, error_message = UpdateAsync(
 			profile.ProfileStore,
 			profile.Key,
 			{
 				ExistingProfileHandle = nil,
 				MissingProfileHandle = nil,
 				EditProfile = function(latest_data)
-
+					
 					-- Check if this session still owns the profile:
 
 					local session_owns_profile = false
@@ -819,9 +834,9 @@ local function SaveProfileAsync(profile, is_ending_session, is_overwriting, last
 			if is_overwriting == true then
 				break
 			end
-
+			
 			repeat_save_flag = false
-
+			
 			local active_session = loaded_data.MetaData.ActiveSession
 			local session_load_count = loaded_data.MetaData.SessionLoadCount
 			local session_owns_profile = false
@@ -829,15 +844,15 @@ local function SaveProfileAsync(profile, is_ending_session, is_overwriting, last
 			if type(active_session) == "table" then
 				session_owns_profile = IsThisSession(active_session) and session_load_count == profile.load_index
 			end
-
+			
 			local force_load_session = loaded_data.MetaData.ForceLoadSession
 			local force_load_pending = false
 			if type(force_load_session) == "table" then
 				force_load_pending = not IsThisSession(force_load_session)
 			end
-
+			
 			local is_active = profile:IsActive()
-
+			
 			-- If another server is trying to start a session for this profile - end the session:
 
 			if force_load_pending == true and session_owns_profile == true then
@@ -846,7 +861,7 @@ local function SaveProfileAsync(profile, is_ending_session, is_overwriting, last
 				end
 				break
 			end
-
+			
 			-- Clearing processed update list / Detecting new updates:
 
 			local locked_updates = profile.locked_global_updates -- [index] = true, ...
@@ -894,7 +909,7 @@ local function SaveProfileAsync(profile, is_ending_session, is_overwriting, last
 								is_processed = true
 								locked_updates[index] = true
 							end
-
+							
 							local send_update_data = DeepCopyTable(update_data)
 
 							task.spawn(handler, send_update_data, processed_callback)
@@ -909,7 +924,7 @@ local function SaveProfileAsync(profile, is_ending_session, is_overwriting, last
 
 				end
 			else
-
+				
 				if profile.roblox_message_subscription ~= nil then
 					profile.roblox_message_subscription:Disconnect()
 				end
@@ -924,10 +939,22 @@ local function SaveProfileAsync(profile, is_ending_session, is_overwriting, last
 			profile.OnAfterSave:Fire(profile.LastSavedData)
 
 		elseif repeat_save_flag == true then
+			
+			if IsPermanentError(error_message) == true then
 
-			-- DataStore call likely resulted in an error; Repeat the DataStore call shortly
-			task.wait(exp_backoff)
-			exp_backoff = math.min(if last_save_reason == "Shutdown" then 8 else 20, exp_backoff * 2)
+				repeat_save_flag = false
+
+				local give_up_message = `Final save stopped retrying after a DataStore error that can never succeed; unsaved changes were not written and the session lock was not released - {tostring(error_message)}`
+				warn(`[{script.Name}]: {give_up_message} (STORE:{profile.ProfileStore.Name}; KEY:{profile.Key})`)
+				OnError:Fire(give_up_message, profile.ProfileStore.Name, profile.Key)
+
+			else
+
+				-- DataStore call likely resulted in an error; Repeat the DataStore call shortly
+				task.wait(exp_backoff)
+				exp_backoff = math.min(if last_save_reason == "Shutdown" then 8 else 20, exp_backoff * 2)
+
+			end
 
 		end
 
@@ -1158,7 +1185,7 @@ function Profile:MessageHandler(fn)
 			local processed_callback = function()
 				locked_updates[index] = true
 			end
-
+			
 			local send_update_data = DeepCopyTable(update_data)
 
 			task.spawn(fn, send_update_data, processed_callback)
@@ -1170,21 +1197,21 @@ function Profile:MessageHandler(fn)
 end
 
 function Profile:Save()
-
+	
 	if self.view_mode == true then
 		error(`[{script.Name}]: Can't save profile in view mode; Should you be calling :SetAsync() instead?`)
 	end
-
+	
 	if self:IsActive() == false then
 		warn(`[{script.Name}]: Attempted saving an inactive profile (STORE:{self.ProfileStore.Name}; KEY:{self.Key});`
 			.. ` Traceback:\n` .. debug.traceback())
 		return
 	end
-
+	
 	-- Move the profile right behind the auto save index to delay the next auto save for it:
 	RemoveProfileFromAutoSave(self)
 	AddProfileToAutoSave(self)
-
+	
 	-- Perform save in new thread:
 	task.spawn(SaveProfileAsync, self)
 
@@ -1336,22 +1363,30 @@ end
 local function RobloxMessageSubscription(profile, unique_session_id)
 
 	local last_roblox_message = 0
-
-	local roblox_message_subscription = MessagingService:SubscribeAsync("PS_" .. unique_session_id, function(message)
-		if type(message.Data) == "table" and message.Data.LoadCount == profile.SessionLoadCount then
-			-- High reaction rate, based on numPlayers × 10 DataStore budget as of writing
-			if os.clock() - last_roblox_message > 6 then 
-				last_roblox_message = os.clock()
-				if profile:IsActive() == true then
-					if message.Data.EndSession == true then
-						SaveProfileAsync(profile, true, false, "External")
-					else
-						profile:Save()
+	
+	local success, roblox_message_subscription = pcall(function()
+		return MessagingService:SubscribeAsync("PS_" .. unique_session_id, function(message)
+			if type(message.Data) == "table" and message.Data.LoadCount == profile.SessionLoadCount then
+				local is_end_session = message.Data.EndSession == true
+				-- High reaction rate, based on numPlayers × 10 DataStore budget as of writing
+				if is_end_session == true or os.clock() - last_roblox_message > 6 then
+					last_roblox_message = os.clock()
+					if profile:IsActive() == true then
+						if is_end_session == true then
+							SaveProfileAsync(profile, true, false, "External")
+						else
+							profile:Save()
+						end
 					end
 				end
 			end
-		end
+		end)
 	end)
+
+	if success == false then
+		warn(`[{script.Name}]: MessagingService subscribe fail (STORE:{profile.ProfileStore.Name}; KEY:{profile.Key}) - {tostring(roblox_message_subscription)}`)
+		return
+	end
 
 	if profile:IsActive() == true then
 		profile.roblox_message_subscription = roblox_message_subscription
@@ -1359,6 +1394,13 @@ local function RobloxMessageSubscription(profile, unique_session_id)
 		roblox_message_subscription:Disconnect()
 	end
 
+end
+
+local function PublishRobloxMessage(topic, data)
+	local success, error_message = pcall(MessagingService.PublishAsync, MessagingService, topic, data)
+	if success == false then
+		warn(`[{script.Name}]: MessagingService publish fail ({topic}) - {tostring(error_message)}`)
+	end
 end
 
 function ProfileStore:StartSessionAsync(profile_key, params)
@@ -1372,17 +1414,17 @@ function ProfileStore:StartSessionAsync(profile_key, params)
 	elseif string.len(profile_key) > 50 then
 		error(`[{script.Name}]: profile_key is too long`)
 	end
-
+	
 	if params ~= nil and type(params) ~= "table" then
 		error(`[{script.Name}]: Invalid params`)
 	end
-
+	
 	params = params or {}
 
 	if ProfileStore.IsClosing == true then
 		return nil
 	end
-
+	
 	WaitForStoreReady(self)
 
 	local session_token = SessionToken(self.Name, profile_key, is_mock)
@@ -1392,9 +1434,9 @@ function ProfileStore:StartSessionAsync(profile_key, params)
 	end
 
 	ActiveProfileLoadJobs = ActiveProfileLoadJobs + 1
-
+	
 	local is_user_cancel = false
-
+	
 	local function cancel_condition()
 		if is_user_cancel == false then
 			if params.Cancel ~= nil then
@@ -1404,7 +1446,7 @@ function ProfileStore:StartSessionAsync(profile_key, params)
 		end
 		return true
 	end
-
+	
 	local user_steal = params.Steal == true
 
 	local force_load_steps = 0 -- Session conflict handling values
@@ -1491,7 +1533,7 @@ function ProfileStore:StartSessionAsync(profile_key, params)
 
 					end,
 					MissingProfileHandle = function(latest_data)
-
+						
 						local is_cancel = ProfileStore.IsClosing == true or cancel_condition() == true
 
 						latest_data.Data = DeepCopyTable(self.template)
@@ -1541,12 +1583,12 @@ function ProfileStore:StartSessionAsync(profile_key, params)
 
 					local profile = Profile.New(loaded_data, key_info, self, profile_key, is_mock, session_token)
 					AddProfileToAutoSave(profile)
-
+					
 					if is_mock ~= true and DataStoreState == "Access" then
-
+						
 						-- Use MessagingService to quickly detect session conflicts and resolve them quickly:
 						task.spawn(RobloxMessageSubscription, profile, unique_session_id) -- Blocking prevention
-
+						
 					end
 
 					if ProfileStore.IsClosing == true or cancel_condition() == true then
@@ -1559,7 +1601,7 @@ function ProfileStore:StartSessionAsync(profile_key, params)
 					return profile
 
 				else
-
+					
 					if ProfileStore.IsClosing == true or cancel_condition() == true then
 						ActiveProfileLoadJobs = ActiveProfileLoadJobs - 1
 						return nil
@@ -1578,13 +1620,13 @@ function ProfileStore:StartSessionAsync(profile_key, params)
 								steal_session = true
 							end
 						end
-
+						
 						-- Request the remote server to end its session:
 						if type(active_session[3]) == "string" then
 							local session_load_count = loaded_data.MetaData.SessionLoadCount or 0
-							task.spawn(MessagingService.PublishAsync, MessagingService, "PS_" .. active_session[3], {LoadCount = session_load_count, EndSession = true})
+							task.spawn(PublishRobloxMessage, "PS_" .. active_session[3], {LoadCount = session_load_count, EndSession = true})
 						end
-
+						
 						-- Attempt to load the profile again after a delay
 						local wait_until = os.clock() + if request_force_load == true then FIRST_LOAD_REPEAT else LOAD_REPEAT_PERIOD
 						repeat task.wait() until os.clock() >= wait_until or ProfileStore.IsClosing == true
@@ -1604,7 +1646,7 @@ function ProfileStore:StartSessionAsync(profile_key, params)
 				return nil -- In this scenario it is likely that this server started shutting down
 			end
 		else
-
+			
 			-- A DataStore call has likely ended in an error:
 
 			local default_timeout = false
@@ -1612,15 +1654,15 @@ function ProfileStore:StartSessionAsync(profile_key, params)
 			if params.Cancel == nil then
 				default_timeout = os.clock() - start >= START_SESSION_TIMEOUT
 			end
-
+			
 			if default_timeout == true or ProfileStore.IsClosing == true or cancel_condition() == true then
 				ActiveProfileLoadJobs = ActiveProfileLoadJobs - 1
 				return nil
 			end
-
+			
 			task.wait(exp_backoff)  -- Repeat the call shortly
 			exp_backoff = math.min(20, exp_backoff * 2)
-
+			
 		end
 
 	end
@@ -1690,27 +1732,27 @@ function ProfileStore:MessageAsync(profile_key, message)
 		)
 
 		if loaded_data ~= nil then
-
+			
 			local session_token = SessionToken(self.Name, profile_key, is_mock)
-
+			
 			local profile = ActiveSessionCheck[session_token]
-
+			
 			if profile ~= nil then
-
+				
 				-- The message was sent to a profile that is active in this server:
 				profile:Save()
-
+				
 			else
-
+				
 				local meta_data = loaded_data.MetaData or {}
 				local active_session = meta_data.ActiveSession
 				local session_load_count = meta_data.SessionLoadCount or 0
-
+				
 				if type(active_session) == "table" and type(active_session[3]) == "string" then
 					-- Request the remote server to auto-save sooner and receive the message:
-					task.spawn(MessagingService.PublishAsync, MessagingService, "PS_" .. active_session[3], {LoadCount = session_load_count})
+					task.spawn(PublishRobloxMessage, "PS_" .. active_session[3], {LoadCount = session_load_count})
 				end
-
+				
 			end
 
 			return true
@@ -1821,7 +1863,7 @@ function ProfileStore:RemoveAsync(profile_key)
 	WaitForStoreReady(self)
 
 	local wipe_status = false
-
+	
 	local next_in_queue = WaitInUpdateQueue(SessionToken(self.Name, profile_key, is_mock))
 
 	if is_mock == true then -- Used when the profile is accessed through ProfileStore.Mock
@@ -1859,7 +1901,7 @@ function ProfileStore:RemoveAsync(profile_key)
 		end)
 
 	end
-
+	
 	next_in_queue()
 
 	return wipe_status
@@ -1893,7 +1935,7 @@ function ProfileVersionQuery.New(profile_store, profile_key, sort_direction, min
 
 end
 
-function MoveVersionQueryQueue(self) -- Hidden ProfileVersionQuery method
+local function MoveVersionQueryQueue(self) -- Hidden ProfileVersionQuery method
 	while #self.query_queue > 0 do
 
 		local queue_entry = table.remove(self.query_queue, 1)
@@ -2104,10 +2146,10 @@ if IsStudio == true then
 	end)
 
 else
-
+	
 	DataStoreState = "Access"
 	ProfileStore.DataStoreState = "Access"
-
+	
 end
 
 -- Update loop:

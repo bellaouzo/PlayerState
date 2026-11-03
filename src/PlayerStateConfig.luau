@@ -34,10 +34,10 @@ local Config = {
 		
 		DataStore = {
 			-- DataStore name (change for different versions/environments)
-			Name = "PlayerData_0.02",
+			Name = "PlayerData_0.03",
 
 			-- Scope: "Production" for live data, "Testing" for mock data that won't save
-			Scope = "Production",
+			Scope = "Testing",
 		},
 
 		-- Check documentation migration instructions for info
@@ -84,6 +84,9 @@ local Config = {
 		-- This can be resource heavy so I would not recommend enabling it unless you really need it
 		AutoCloneTables = false,
 
+		-- If enabled, Set/SetPath/Increment/Decrement/SetInDict skip replication and OnChanged when a non-table value is unchanged
+		SkipUnchangedWrites = false,
+
 		-- How long to wait for player data to load before timing out (in seconds)
 		DataWaitTimeout = 10,
 
@@ -96,6 +99,11 @@ local Config = {
 
 		ServerOnlyRoots = {
 			"Server",
+		},
+
+		LeaderstatsOrder = {
+			"Gems",
+			"💰 Coins",
 		},
 
 		-- Batch processing settings

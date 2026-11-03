@@ -31,6 +31,9 @@ local function UpdateLeaderstatValue(leaderstats: Instance, displayName: string,
 		local currentType = valueObject.ClassName
 
 		if currentType ~= requiredType then
+			local siblings = leaderstats:GetChildren()
+			local index = table.find(siblings, valueObject) or #siblings
+
 			valueObject:Destroy()
 			local newValueObject = Instance.new(requiredType)
 			local newNumericValue = newValueObject :: any
@@ -38,6 +41,14 @@ local function UpdateLeaderstatValue(leaderstats: Instance, displayName: string,
 			newNumericValue.Value = newValue
 			newValueObject.Name = displayName
 			newValueObject.Parent = leaderstats
+
+			for i = index + 1, #siblings do
+				local sibling = siblings[i]
+				if sibling.Parent == leaderstats then
+					sibling.Parent = nil
+					sibling.Parent = leaderstats
+				end
+			end
 		else
 			local numericValue = valueObject :: any
 			numericValue.Value = newValue
@@ -59,7 +70,35 @@ local function GetRelativeValue(value: any, relativeKeys: {string}): any
 	return current
 end
 
-function Leaderstats.CreateLeaderstats(player: Player, profileData: any, getNestedValue: (data: any, path: string) -> any): ()
+function Leaderstats.ResolveOrder(leaderstatsConfig: any, order: {string}?): {string}
+	local ordered: {string} = {}
+	if typeof(leaderstatsConfig) ~= "table" then
+		return ordered
+	end
+
+	local added: {[string]: boolean} = {}
+
+	if typeof(order) == "table" then
+		for _, displayName in order do
+			if typeof(displayName) == "string" and not added[displayName] and leaderstatsConfig[displayName] ~= nil then
+				added[displayName] = true
+				table.insert(ordered, displayName)
+			end
+		end
+	end
+
+	local remaining: {string} = {}
+	for displayName in leaderstatsConfig do
+		if typeof(displayName) == "string" and not added[displayName] then
+			table.insert(remaining, displayName)
+		end
+	end
+	table.sort(remaining)
+
+	return table.move(remaining, 1, #remaining, #ordered + 1, ordered)
+end
+
+function Leaderstats.CreateLeaderstats(player: Player, profileData: any, getNestedValue: (data: any, path: string) -> any, order: {string}?): ()
 	local leaderstatsConfig = profileData.leaderstats
 	if not leaderstatsConfig then
 		return
@@ -69,7 +108,8 @@ function Leaderstats.CreateLeaderstats(player: Player, profileData: any, getNest
 	leaderstats.Name = "leaderstats"
 	leaderstats.Parent = player
 
-	for displayName, dataPath in leaderstatsConfig do
+	for _, displayName in Leaderstats.ResolveOrder(leaderstatsConfig, order) do
+		local dataPath = leaderstatsConfig[displayName]
 		local currentValue = getNestedValue(profileData, dataPath)
 
 		if typeof(currentValue) == "number" then
@@ -106,7 +146,7 @@ function Leaderstats.UpdateLeaderstatsForPath(player: Player, profileData: any, 
 	end
 end
 
-function Leaderstats.SetupLeaderstatsSync(player: Player, replica: any, getProfile: (player: Player) -> any?, validateProfile: (profile: any?) -> boolean, getNestedValue: (data: any, path: string) -> any): ()
+function Leaderstats.SetupLeaderstatsSync(player: Player, replica: any, getProfile: (player: Player) -> any?, validateProfile: (profile: any?) -> boolean, getNestedValue: (data: any, path: string) -> any, order: {string}?): ()
 	local profile = getProfile(player)
 	if not profile or not validateProfile(profile) then
 		return
@@ -115,10 +155,11 @@ function Leaderstats.SetupLeaderstatsSync(player: Player, replica: any, getProfi
 	local leaderstatsConfig = (replica.Data :: any).leaderstats
 	if not leaderstatsConfig then return end
 
-	Leaderstats.CreateLeaderstats(player, profile.Data, getNestedValue)
+	Leaderstats.CreateLeaderstats(player, profile.Data, getNestedValue, order)
 
 	local pathToDisplayNames: {[string]: {string}} = {}
 	local prefixToDescendants: {[string]: {DescendantMapping}} = {}
+	local rootKeys: {[string]: boolean} = {}
 
 	if typeof(leaderstatsConfig) == "table" then
 		for displayName, dataPath in leaderstatsConfig do
@@ -138,6 +179,12 @@ function Leaderstats.SetupLeaderstatsSync(player: Player, replica: any, getProfi
 				table.insert(segments, segment)
 			end
 
+			local firstDot = string.find(dataPath, ".", 1, true)
+			rootKeys[if firstDot then string.sub(dataPath, 1, firstDot - 1) else dataPath] = true
+			if segments[1] then
+				rootKeys[segments[1]] = true
+			end
+
 			local prefix = ""
 			for depth = 1, #segments - 1 do
 				prefix = if depth == 1 then segments[1] else prefix .. "." .. segments[depth]
@@ -154,6 +201,15 @@ function Leaderstats.SetupLeaderstatsSync(player: Player, replica: any, getProfi
 				})
 			end
 		end
+	end
+
+	local function IsMappedRoot(firstKey: any): boolean
+		if firstKey == nil then
+			return false
+		end
+
+		local key = if typeof(firstKey) == "string" then firstKey else tostring(firstKey)
+		return rootKeys[key] == true or string.find(key, ".", 1, true) ~= nil
 	end
 
 	local function ApplyForPath(pathString: string, value: any): ()
@@ -184,7 +240,7 @@ function Leaderstats.SetupLeaderstatsSync(player: Player, replica: any, getProfi
 	local originalSet = replica.Set
 	local originalSetValues = replica.SetValues
 
-	replica.Set = function(self, path: {string}, value: any)
+	replica.Set = function(self, path: {string}, value: any): boolean
 		local success, err = pcall(originalSet, self, path, value)
 		if not success then
 			warn(`[PlayerState] Set operation failed for {player.Name}: {err}`)
@@ -192,6 +248,10 @@ function Leaderstats.SetupLeaderstatsSync(player: Player, replica: any, getProfi
 		end
 
 		local firstKey = path[1]
+		if not IsMappedRoot(firstKey) then
+			return success
+		end
+
 		if #path == 1 and typeof(firstKey) == "string" then
 			ApplyForPath(firstKey, value)
 		else
@@ -201,7 +261,7 @@ function Leaderstats.SetupLeaderstatsSync(player: Player, replica: any, getProfi
 		return success
 	end
 
-	replica.SetValues = function(self, path: {string}, values: {[string]: any})
+	replica.SetValues = function(self, path: {string}, values: {[string]: any}): boolean
 		local success, err = pcall(originalSetValues, self, path, values)
 		if not success then
 			warn(`[PlayerState] SetValues operation failed for {player.Name}: {err}`)
@@ -210,9 +270,11 @@ function Leaderstats.SetupLeaderstatsSync(player: Player, replica: any, getProfi
 
 		if #path == 0 then
 			for key, value in values do
-				ApplyForPath(tostring(key), value)
+				if IsMappedRoot(key) then
+					ApplyForPath(if typeof(key) == "string" then key else tostring(key), value)
+				end
 			end
-		else
+		elseif IsMappedRoot(path[1]) then
 			local basePath = table.concat(path, ".")
 			for key, value in values do
 				ApplyForPath(basePath .. "." .. tostring(key), value)

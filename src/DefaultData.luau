@@ -4,6 +4,7 @@ return {
 
 	-- Adds "Coins" to data and defaults to 0
 	Coins = 0,
+	Gems = 0,
 
 	-- Example table for default data
 	
@@ -29,5 +30,6 @@ return {
 	-- Data that goes onto leaderstats/top right leaderboard display
 	leaderstats = {
 		["💰 Coins"] = "Coins",
+		["Gems"] = "Gems",
 	}
 }
